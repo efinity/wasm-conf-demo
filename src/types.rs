@@ -12,11 +12,12 @@ pub struct Config {
     pub gold_token_id: TokenId,
     pub initial_token_id: TokenId,
     pub initial_hero_health: u32,
-    pub initial_hero_stats_range: Range<u32>,
-    pub enemy_health_range: Range<u32>,
-    pub enemy_strength_range: Range<u32>,
+    pub initial_hero_stats_range: Range,
+    pub enemy_health_range: Range,
+    pub enemy_strength_range: Range,
     /// Percentage between 0 and 100
     pub enemy_wearing_hat_chance: u32,
+    pub hero_goes_first_chance: u32,
     pub potion_cost: TokenBalance,
     pub weapon_cost: TokenBalance,
 }
@@ -32,6 +33,7 @@ impl Default for Config {
             enemy_health_range: (10, 30).into(),
             enemy_strength_range: (5, 15).into(),
             enemy_wearing_hat_chance: 40,
+            hero_goes_first_chance: 50,
             potion_cost: 50,
             weapon_cost: 200,
         }
@@ -42,9 +44,13 @@ impl Default for Config {
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct ConfigMutation {
     pub initial_hero_health: Option<u32>,
-    pub initial_hero_stats_range: Option<Range<u32>>,
+    pub initial_hero_stats_range: Option<Range>,
     pub potion_cost: Option<TokenBalance>,
     pub weapon_cost: Option<TokenBalance>,
+    pub enemy_health_range: Option<Range>,
+    pub enemy_strength_range: Option<Range>,
+    pub enemy_wearing_hat_chance: Option<u32>,
+    pub hero_goes_first_chance: Option<u32>,
 }
 
 impl ConfigMutation {
@@ -63,20 +69,31 @@ impl ConfigMutation {
         maybe_set_field!(initial_hero_stats_range);
         maybe_set_field!(potion_cost);
         maybe_set_field!(weapon_cost);
+        maybe_set_field!(enemy_health_range);
+        maybe_set_field!(enemy_strength_range);
+        maybe_set_field!(enemy_wearing_hat_chance);
+        maybe_set_field!(hero_goes_first_chance);
     }
 }
 
+/// The range is inclusive
 #[derive(
     Debug, Encode, Decode, SpreadLayout, PackedLayout, SpreadAllocate, Copy, Clone, Eq, PartialEq,
 )]
 #[cfg_attr(feature = "std", derive(TypeInfo, StorageLayout))]
-pub struct Range<T> {
-    pub start: T,
-    pub end: T,
+pub struct Range {
+    pub start: u32,
+    pub end: u32,
 }
 
-impl<T> From<(T, T)> for Range<T> {
-    fn from(values: (T, T)) -> Self {
+impl Range {
+    pub fn contains(&self, value: u32) -> bool {
+        value >= self.start && value <= self.end
+    }
+}
+
+impl From<(u32, u32)> for Range {
+    fn from(values: (u32, u32)) -> Self {
         Self {
             start: values.0,
             end: values.1,
@@ -151,13 +168,22 @@ pub struct Enemy {
 )]
 #[cfg_attr(feature = "std", derive(TypeInfo, StorageLayout))]
 pub struct Battle {
-    pub hero_id: AccountId,
+    pub round_number: u32,
     pub enemy: Enemy,
+}
+
+impl Battle {
+    pub fn new(enemy: Enemy) -> Self {
+        Self {
+            round_number: 0,
+            enemy,
+        }
+    }
 }
 
 // Tokens
 
-#[derive(Encode, Decode, Eq, PartialEq, Copy, Clone)]
+#[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 #[repr(u8)]
 pub enum TokenType {

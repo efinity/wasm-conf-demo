@@ -32,6 +32,8 @@ mod game {
         InvalidEquipment,
         AttributeDecodeFailed,
         HeroNotFound,
+        HeroNotInBattle,
+        HeroHasNoPotions,
     }
 
     /// Result type for the game
@@ -65,6 +67,12 @@ mod game {
         #[ink(message)]
         pub fn get_config(&self) -> Config {
             self.config.clone()
+        }
+
+        /// Returns the `Hero` for `account_id`
+        #[ink(message)]
+        pub fn get_hero(&self, account_id: AccountId) -> Option<Hero> {
+            self.heroes.get(account_id)
         }
 
         /// Modify the configuration of the game. Only callable by the owner.
@@ -102,17 +110,32 @@ mod game {
         /// Start a battle with a randomly generated enemy
         #[ink(message)]
         pub fn start_battle(&mut self) -> Result<()> {
-            let mut hero = self
-                .heroes
-                .get(self.env().caller())
-                .ok_or(Error::HeroNotFound)?;
+            let caller = self.env().caller();
+            let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
+            let enemy = self.generate_enemy();
+            hero.battle = Some(Battle::new(enemy));
+            self.heroes.insert(caller, &hero);
             Ok(())
         }
 
         /// Advance the battle to the next turn
         #[ink(message)]
-        pub fn advance_battle(&mut self, command: Command) {
-            todo!()
+        pub fn advance_battle(&mut self, command: Command) -> Result<()> {
+            let caller = self.env().caller();
+            let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
+            let mut battle = hero.battle.ok_or(Error::HeroNotInBattle)?;
+
+            let hero_goes_first = self.random_chance(self.config.hero_goes_first_chance);
+            if hero_goes_first {
+                self.hero_action(&mut hero, &mut battle, command)?;
+                self.enemy_action()?;
+            } else {
+                self.enemy_action()?;
+                self.hero_action(&mut hero, &mut battle, command)?;
+            }
+            hero.battle = Some(battle);
+            self.heroes.insert(caller, &hero);
+            Ok(())
         }
 
         /// Change the equipment of the caller's hero
@@ -121,15 +144,10 @@ mod game {
             let caller = self.env().caller();
             let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
 
-            // get the metadata
-            let attribute = self
-                .env()
-                .extension()
-                .attribute_of(self.config.collection_id, Some(token_id), attribute_key())
+            // get the token type
+            let metadata = self
+                .get_metadata(token_id)?
                 .ok_or(Error::InvalidEquipment)?;
-            let metadata: TokenMetadata = Decode::decode(&mut &attribute.value[..])
-                .map_err(|_| Error::AttributeDecodeFailed)?;
-
             match metadata.token_type {
                 TokenType::Weapon => hero.weapon_id = token_id,
                 TokenType::Hat => hero.hat_id = Some(token_id),
@@ -186,7 +204,7 @@ mod game {
             &mut self,
             token_id: TokenId,
             token_type: TokenType,
-            value_range: Option<Range<u32>>,
+            value_range: Option<Range>,
         ) {
             let metadata = TokenMetadata {
                 token_type,
@@ -204,7 +222,7 @@ mod game {
 
         fn generate_enemy(&mut self) -> Enemy {
             let hat_id = {
-                if self.random_in_range((0, 100).into()) >= self.config.enemy_wearing_hat_chance {
+                if self.random_chance(self.config.enemy_wearing_hat_chance) {
                     let hat_id = self.mint_nft();
                     self.add_equipment_attribute(hat_id, TokenType::Hat, None);
                     Some(hat_id)
@@ -219,7 +237,50 @@ mod game {
             }
         }
 
-        fn random_in_range(&mut self, range: Range<u32>) -> u32 {
+        fn hero_action(
+            &mut self,
+            hero: &mut Hero,
+            battle: &mut Battle,
+            command: Command,
+        ) -> Result<()> {
+            match command {
+                Command::Attack => {
+                    let metadata = self
+                        .get_metadata(hero.weapon_id)?
+                        .ok_or(Error::InvalidEquipment)?;
+                    let strength = metadata.value;
+                    battle.enemy.health = battle.enemy.health.saturating_sub(strength);
+                }
+                Command::Heal => {
+                    if hero.potion_count == 0 {
+                        return Err(Error::HeroHasNoPotions);
+                    }
+                    hero.health = hero.max_health;
+                }
+            }
+            Ok(())
+        }
+
+        fn enemy_action(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
+            if let Some(attribute) = self.env().extension().attribute_of(
+                self.config.collection_id,
+                Some(token_id),
+                attribute_key(),
+            ) {
+                Ok(Some(
+                    Decode::decode(&mut &attribute.value[..])
+                        .map_err(|_| Error::AttributeDecodeFailed)?,
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn random_in_range(&mut self, range: Range) -> u32 {
             let mut subject = [0_u8; 12];
             subject[0..4].copy_from_slice(&self.random_seed.to_le_bytes());
             subject[4..8].copy_from_slice(&self.random_nonce.to_le_bytes());
@@ -231,15 +292,21 @@ mod game {
             let random_number = u32::from_le_bytes(bytes);
             lerp(range.start, range.end, random_number)
         }
+
+        fn random_chance(&mut self, chance: u32) -> bool {
+            self.random_in_range((0, 100).into()) <= chance
+        }
     }
 
     /// Linearly interpolates between `a` and `b` by `t`, where `t` is considered
     /// a fraction of its max value
     fn lerp(a: u32, b: u32, t: u32) -> u32 {
-        const PRECISION: u64 = 1000;
+        const PRECISION: u64 = 100;
         let input = (t as u64) * PRECISION;
         let fraction = input / u32::MAX as u64;
-        let output = ((fraction * b as u64) / PRECISION) + a as u64;
+        let length: u64 = b as u64 - a as u64;
+        let output = ((fraction * length) / PRECISION) + a as u64;
+        // println!("a: {}, b: {}, t: {}, output: {}", a, b, t, output);
         output as u32
     }
 
@@ -248,13 +315,18 @@ mod game {
         use super::*;
         use crate::mock::Token;
         use efinity_contracts::AccountId;
-        use ink_env::{caller, test, Error::Decode};
+        use ink_env::{caller, test};
         use mock::MockChainExtension;
         use scale::Encode;
         use std::{cell::RefCell, collections::HashMap};
 
         thread_local! {
             pub static MOCK_EFINITY: RefCell<MockChainExtension> = RefCell::new(Default::default());
+        }
+
+        fn init_game(config: Config) -> Game {
+            mock::register_chain_extension();
+            Game::new(config, 0)
         }
 
         fn accounts() -> test::DefaultAccounts<EfinityEnvironment> {
@@ -273,8 +345,7 @@ mod game {
             // init game
             let config = Config::default();
             let collection_id = config.collection_id;
-            let mut game = Game::new(config, 0);
-            mock::register_chain_extension();
+            let mut game = init_game(config);
 
             // create a hero for bob
             test::set_caller::<EfinityEnvironment>(bob());
@@ -318,9 +389,73 @@ mod game {
         }
 
         #[ink::test]
+        fn test_start_battle() {
+            let config = Config {
+                enemy_health_range: (10, 20).into(),
+                enemy_strength_range: (30, 50).into(),
+                enemy_wearing_hat_chance: 100,
+                ..Default::default()
+            };
+            let mut game = init_game(config.clone());
+
+            // starting a battle without a hero fails
+            assert_eq!(game.start_battle().unwrap_err(), Error::HeroNotFound);
+
+            // create the hero and then start the battle
+            game.create_hero();
+            game.start_battle().unwrap();
+            let hero = game.get_hero(alice()).unwrap();
+            let enemy = hero.battle.unwrap().enemy;
+
+            let attribute = game
+                .env()
+                .extension()
+                .attribute_of(config.collection_id, enemy.hat_id, attribute_key())
+                .unwrap();
+            let metadata: TokenMetadata = Decode::decode(&mut &attribute.value[..]).unwrap();
+            assert_eq!(metadata.token_type, TokenType::Hat);
+
+            println!("enemy: {:?}", enemy);
+            // the enemy stats should be in the correct ranges
+            assert!(config.enemy_health_range.contains(enemy.health));
+            assert!(config.enemy_strength_range.contains(enemy.strength));
+
+            // lets change the config to never make an enemy wear a hat
+            let mutation = ConfigMutation {
+                enemy_wearing_hat_chance: Some(0),
+                ..Default::default()
+            };
+            game.mutate_config(mutation).unwrap();
+
+            // bob starts a battle
+            test::set_caller::<EfinityEnvironment>(bob());
+            game.create_hero();
+            game.start_battle().unwrap();
+
+            // ensure the enemy has no hat
+            let hero = game.get_hero(bob()).unwrap();
+            let enemy = hero.battle.unwrap().enemy;
+            assert!(enemy.hat_id.is_none());
+        }
+
+        #[ink::test]
+        fn test_advance_battle() {
+            let mut game = init_game(Default::default());
+            game.create_hero();
+            game.start_battle().unwrap();
+            let initial_enemy = game.get_hero(alice()).unwrap().battle.unwrap().enemy;
+            println!("initial_enemy: {:?}", initial_enemy);
+            game.advance_battle(Command::Attack).unwrap();
+            let hero = game.get_hero(alice()).unwrap();
+            let hero_strength = game.get_metadata(hero.weapon_id).unwrap().unwrap().value;
+            println!("hero_strength: {}", hero_strength);
+            let battle = hero.battle.unwrap();
+            assert_eq!(battle.enemy.health, initial_enemy.health - hero_strength);
+        }
+
+        #[ink::test]
         fn test_set_hero_equipment() {
-            mock::register_chain_extension();
-            let mut game = Game::new(Default::default(), 0);
+            let mut game = init_game(Default::default());
             game.create_hero();
 
             // cannot set to token that does not exist
@@ -343,6 +478,20 @@ mod game {
             assert_eq!(lerp(0, 100, (u32::MAX / 2) + 1), 50);
             assert_eq!(lerp(0, 100, (u32::MAX / 10) + 1), 10);
             assert_eq!(lerp(5, 100, 0), 5);
+        }
+
+        #[test]
+        fn test_range() {
+            let range = Range { start: 5, end: 10 };
+
+            // contains
+            assert!(range.contains(5));
+            assert!(range.contains(7));
+            assert!(range.contains(10));
+
+            // does not contain
+            assert!(!range.contains(4));
+            assert!(!range.contains(11));
         }
     }
 }
