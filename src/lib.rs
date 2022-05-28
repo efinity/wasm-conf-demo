@@ -8,30 +8,26 @@ use efinity_contracts::{prelude::*, Freeze, MintRecipient, ReserveIdentifier, Tr
 use ink::codegen::Env;
 use ink_lang as ink;
 use ink_prelude::vec::Vec;
-use ink_storage::traits::SpreadAllocate;
-use ink_storage::Mapping;
+use ink_storage::{traits::SpreadAllocate, Mapping};
 use types::*;
 
-const EQUIPMENT_ATTRIBUTE_KEY: &[u8; 9] = b"equipment";
-// static EQUIPMENT_ATTRIBUTE_KEY: AttributeKey = b"equipment".to_vec();
-
+/// The attribute key used for equipment
 fn attribute_key() -> AttributeKey {
-    EQUIPMENT_ATTRIBUTE_KEY.to_vec()
+    b"equipment".to_vec()
 }
 
 /// Multi-Tokens example smart contract
 #[ink::contract(env = EfinityEnvironment)]
 mod game {
     use super::*;
-    use scale::Decode;
-    use scale::Encode;
+    use scale::{Decode, Encode};
 
     /// Error types for the game
     #[derive(Debug, PartialEq, Eq, Encode, Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
-        /// The caller does not have permission for this operation
-        NoPermission,
+        /// The caller is not allowed to call this function
+        NotAllowed,
         /// The equipment being equipped is invalid
         InvalidEquipment,
         AttributeDecodeFailed,
@@ -65,27 +61,20 @@ mod game {
             })
         }
 
-        /// Modify the configuration of the game
+        /// Returns the game's config
+        #[ink(message)]
+        pub fn get_config(&self) -> Config {
+            self.config.clone()
+        }
+
+        /// Modify the configuration of the game. Only callable by the owner.
         #[ink(message)]
         pub fn mutate_config(&mut self, mutation: ConfigMutation) -> Result<()> {
             // make sure the owner is the caller
             if self.env().caller() != self.owner {
-                return Err(Error::NoPermission);
+                return Err(Error::NotAllowed);
             }
-
-            // mutate the fields that have values
-            if let Some(collection_id) = mutation.collection_id {
-                self.config.collection_id = collection_id;
-            }
-            if let Some(currency_token_id) = mutation.gold_token_id {
-                self.config.gold_token_id = currency_token_id;
-            }
-            if let Some(initial_token_id) = mutation.initial_token_id {
-                self.config.initial_token_id = initial_token_id;
-            }
-            if let Some(initial_hero_health) = mutation.initial_hero_health {
-                self.config.initial_hero_health = initial_hero_health;
-            }
+            mutation.apply_to(&mut self.config);
             Ok(())
         }
 
@@ -94,29 +83,18 @@ mod game {
         pub fn create_hero(&mut self) -> Hero {
             let caller = self.env().caller();
 
-            // mint the equipment tokens
-            let token_ids = self.mint_nfts(2);
+            // mint the weapon token
+            let weapon_id = self.mint_nft();
 
             // add attribute to equipment tokens
-            let weapon_token_id = token_ids[0];
-            let armor_token_id = token_ids[1];
             self.add_equipment_attribute(
-                weapon_token_id,
+                weapon_id,
                 TokenType::Weapon,
-                self.config.initial_hero_stats_range,
-            );
-            self.add_equipment_attribute(
-                armor_token_id,
-                TokenType::Hat,
-                self.config.initial_hero_stats_range,
+                Some(self.config.initial_hero_stats_range),
             );
 
-            // create hero with the tokens we just minted
-            let hero = Hero::new(
-                self.config.initial_hero_health,
-                weapon_token_id,
-                Some(armor_token_id),
-            );
+            // create hero with the token we just minted
+            let hero = Hero::new(self.config.initial_hero_health, weapon_id);
             self.heroes.insert(caller, &hero);
             hero
         }
@@ -124,7 +102,7 @@ mod game {
         /// Start a battle with a randomly generated enemy
         #[ink(message)]
         pub fn start_battle(&mut self) -> Result<()> {
-            let hero = self
+            let mut hero = self
                 .heroes
                 .get(self.env().caller())
                 .ok_or(Error::HeroNotFound)?;
@@ -187,34 +165,34 @@ mod game {
             token_id
         }
 
-        fn mint_nfts(&mut self, count: usize) -> Vec<TokenId> {
+        fn mint_nft(&mut self) -> TokenId {
             let caller = self.env().caller();
-            let token_ids: Vec<_> = (0..count).map(|_| self.increment_next_token_id()).collect();
-            for token_id in &token_ids {
-                let params = MintParams::CreateToken {
-                    token_id: *token_id,
-                    initial_supply: 1,
-                    unit_price: 100_000_000_000_000_000,
-                    // unit_price: self.env().extension().get_token_account_deposit(),
-                    cap: None,
-                    // cap: Some(TokenCap::SingleMint),
-                };
-                self.env()
-                    .extension()
-                    .mint(caller, self.config.collection_id, params.clone());
-            }
-            token_ids
+            let token_id = self.increment_next_token_id();
+            let params = MintParams::CreateToken {
+                token_id,
+                initial_supply: 1,
+                // unit_price: 100_000_000_000_000_000,
+                unit_price: self.env().extension().get_token_account_deposit(),
+                // cap: None,
+                cap: Some(TokenCap::SingleMint),
+            };
+            self.env()
+                .extension()
+                .mint(caller, self.config.collection_id, params.clone());
+            token_id
         }
 
         fn add_equipment_attribute(
             &mut self,
             token_id: TokenId,
             token_type: TokenType,
-            value_range: Range<u32>,
+            value_range: Option<Range<u32>>,
         ) {
             let metadata = TokenMetadata {
                 token_type,
-                value: self.random_in_range(value_range),
+                value: value_range
+                    .map(|x| self.random_in_range(x))
+                    .unwrap_or_default(),
             };
             self.env().extension().set_attribute(
                 self.config.collection_id,
@@ -222,6 +200,23 @@ mod game {
                 attribute_key(),
                 metadata.encode(),
             );
+        }
+
+        fn generate_enemy(&mut self) -> Enemy {
+            let hat_id = {
+                if self.random_in_range((0, 100).into()) >= self.config.enemy_wearing_hat_chance {
+                    let hat_id = self.mint_nft();
+                    self.add_equipment_attribute(hat_id, TokenType::Hat, None);
+                    Some(hat_id)
+                } else {
+                    None
+                }
+            };
+            Enemy {
+                hat_id,
+                health: self.random_in_range(self.config.enemy_health_range),
+                strength: self.random_in_range(self.config.enemy_strength_range),
+            }
         }
 
         fn random_in_range(&mut self, range: Range<u32>) -> u32 {
@@ -241,9 +236,10 @@ mod game {
     /// Linearly interpolates between `a` and `b` by `t`, where `t` is considered
     /// a fraction of its max value
     fn lerp(a: u32, b: u32, t: u32) -> u32 {
-        let input = (t as u64) * 1000;
+        const PRECISION: u64 = 1000;
+        let input = (t as u64) * PRECISION;
         let fraction = input / u32::MAX as u64;
-        let output = ((fraction * b as u64) / 1000) + a as u64;
+        let output = ((fraction * b as u64) / PRECISION) + a as u64;
         output as u32
     }
 
@@ -252,12 +248,10 @@ mod game {
         use super::*;
         use crate::mock::Token;
         use efinity_contracts::AccountId;
-        use ink_env::Error::Decode;
-        use ink_env::{caller, test};
+        use ink_env::{caller, test, Error::Decode};
         use mock::MockChainExtension;
         use scale::Encode;
-        use std::cell::RefCell;
-        use std::collections::HashMap;
+        use std::{cell::RefCell, collections::HashMap};
 
         thread_local! {
             pub static MOCK_EFINITY: RefCell<MockChainExtension> = RefCell::new(Default::default());
@@ -266,9 +260,11 @@ mod game {
         fn accounts() -> test::DefaultAccounts<EfinityEnvironment> {
             test::default_accounts()
         }
-
         fn alice() -> AccountId {
             accounts().alice
+        }
+        fn bob() -> AccountId {
+            accounts().bob
         }
 
         /// Test that the `create_hero` function is working
@@ -281,44 +277,44 @@ mod game {
             mock::register_chain_extension();
 
             // create a hero for bob
-            let accounts = test::default_accounts::<EfinityEnvironment>();
-            test::set_caller::<EfinityEnvironment>(accounts.bob);
+            test::set_caller::<EfinityEnvironment>(bob());
             let hero = game.create_hero();
 
             // verify the hero's tokens for weapon and armor were minted
-            assert_eq!(hero, game.heroes.get(accounts.bob).unwrap());
+            assert_eq!(hero, game.heroes.get(bob()).unwrap());
             MOCK_EFINITY.with(|efinity| {
                 let efinity = efinity.borrow();
-                let weapon_id = hero.weapon_id;
-                let armor_id = hero.hat_id.unwrap();
 
-                // assert tokens exist
-                assert!(efinity.token_of(collection_id, weapon_id).is_some());
-                assert!(efinity.token_of(collection_id, armor_id).is_some());
+                // assert weapon token exists
+                assert!(efinity.token_of(collection_id, hero.weapon_id).is_some());
 
-                // assert bob has the tokens
-                assert_eq!(
-                    efinity.balance_of(collection_id, weapon_id, accounts.bob),
-                    1
-                );
-                assert_eq!(efinity.balance_of(collection_id, armor_id, accounts.bob), 1);
+                // assert bob has the weapon token
+                assert_eq!(efinity.balance_of(collection_id, hero.weapon_id, bob()), 1);
 
-                // assert attributes exist
+                // assert the weapon token attribute exists
                 assert!(efinity
-                    .attribute_of(
-                        collection_id,
-                        Some(weapon_id),
-                        EQUIPMENT_ATTRIBUTE_KEY.to_vec()
-                    )
-                    .is_some());
-                assert!(efinity
-                    .attribute_of(
-                        collection_id,
-                        Some(armor_id),
-                        EQUIPMENT_ATTRIBUTE_KEY.to_vec()
-                    )
+                    .attribute_of(collection_id, Some(hero.weapon_id), attribute_key())
                     .is_some());
             })
+        }
+
+        #[ink::test]
+        fn test_mutate_config() {
+            let initial_config = Config::default();
+            let mut game = Game::new(initial_config.clone(), 0);
+            let mutation = ConfigMutation {
+                potion_cost: Some(1000),
+                ..Default::default()
+            };
+            game.mutate_config(mutation).unwrap();
+            let mut config = game.get_config();
+
+            // make sure the potion cost changed
+            assert_eq!(config.potion_cost, 1000);
+
+            // if we change the potion cost back, everything else should be the same
+            config.potion_cost = initial_config.potion_cost;
+            assert_eq!(initial_config, config);
         }
 
         #[ink::test]
@@ -331,12 +327,11 @@ mod game {
             assert_eq!(game.equip(10).unwrap_err(), Error::InvalidEquipment);
 
             // Mint some NFTs. It will still fail because there is no weapon attribute
-            let token_ids = game.mint_nfts(2);
-            let weapon_id = token_ids[0];
+            let weapon_id = game.mint_nft();
             assert_eq!(game.equip(weapon_id).unwrap_err(), Error::InvalidEquipment);
 
             // add equipment attribute and now it works
-            game.add_equipment_attribute(weapon_id, TokenType::Weapon, (1, 1).into());
+            game.add_equipment_attribute(weapon_id, TokenType::Weapon, Some((1, 1).into()));
             game.equip(weapon_id).unwrap();
             let hero = game.heroes.get(alice()).unwrap();
             assert_eq!(hero.weapon_id, weapon_id);
@@ -348,16 +343,6 @@ mod game {
             assert_eq!(lerp(0, 100, (u32::MAX / 2) + 1), 50);
             assert_eq!(lerp(0, 100, (u32::MAX / 10) + 1), 10);
             assert_eq!(lerp(5, 100, 0), 5);
-        }
-
-        #[ink::test]
-        fn test_generate_random_number() {
-            // let game = Game::new(Default::default());
-            // let mut hash = [0_u8; 32];
-            // let random_number = game.hash_to_ranged_number(hash, 100);
-            // assert_eq!(random_number, 0);
-            // hash[0] = 126;
-            // assert_eq!(game.hash_to_ranged_number(hash, 100), 50);
         }
     }
 }

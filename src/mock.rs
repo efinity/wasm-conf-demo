@@ -1,13 +1,10 @@
-use crate::game::tests;
-use crate::{AttributeKey, AttributeValue};
+use crate::{game::tests, AttributeKey, AttributeValue};
 use efinity_contracts::{
     AccountId, Attribute, Balance, CollectionId, MintParams, TokenBalance, TokenId,
 };
 use ink_env::test;
 use scale::{Decode, Encode};
-use std::borrow::Borrow;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::{borrow::Borrow, cell::RefCell, collections::HashMap};
 use tests::MOCK_EFINITY;
 
 const MINT: u32 = 1140261079;
