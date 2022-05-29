@@ -11,12 +11,14 @@ const MINT: u32 = 1140261079;
 const GET_TOKEN_ACCOUNT_DEPOSIT: u32 = 299862019;
 const SET_ATTRIBUTE: u32 = 2427127331;
 const ATTRIBUTE_OF: u32 = 3842143254;
+const BALANCE_OF: u32 = 1627189794;
 
 pub fn register_chain_extension() {
     test::register_chain_extension(MockExtensionFunction::<MINT>);
     test::register_chain_extension(MockExtensionFunction::<SET_ATTRIBUTE>);
-    test::register_chain_extension(MockExtensionFunction::<ATTRIBUTE_OF>);
     test::register_chain_extension(MockExtensionFunction::<GET_TOKEN_ACCOUNT_DEPOSIT>);
+    test::register_chain_extension(MockExtensionFunction::<ATTRIBUTE_OF>);
+    test::register_chain_extension(MockExtensionFunction::<BALANCE_OF>);
 }
 
 #[derive(Default)]
@@ -53,7 +55,20 @@ impl MockChainExtension {
                             },
                         );
                     }
-                    MintParams::Mint { .. } => unimplemented!(),
+                    MintParams::Mint {
+                        token_id,
+                        amount,
+                        unit_price,
+                    } => {
+                        self.tokens
+                            .entry((collection_id, token_id))
+                            .and_modify(|x| x.supply += amount)
+                            .or_insert(Token { supply: amount });
+                        self.token_accounts
+                            .entry((recipient, collection_id, token_id))
+                            .and_modify(|x| x.balance += amount)
+                            .or_insert(TokenAccount { balance: amount });
+                    }
                 };
             }
             SET_ATTRIBUTE => {
@@ -77,6 +92,12 @@ impl MockChainExtension {
                     Decode::decode(&mut &input[1..]).unwrap();
                 let attribute = self.attribute_of(collection_id, token_id, key);
                 Encode::encode_to(&attribute, output);
+            }
+            BALANCE_OF => {
+                let (collection_id, token_id, account_id): (CollectionId, TokenId, AccountId) =
+                    Decode::decode(&mut &input[2..]).unwrap();
+                let balance = self.balance_of(collection_id, token_id, account_id);
+                Encode::encode_to(&balance, output);
             }
             _ => panic!(),
         }

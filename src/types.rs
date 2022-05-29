@@ -8,16 +8,16 @@ use scale_info::TypeInfo;
 #[derive(Debug, Encode, Decode, SpreadLayout, PackedLayout, SpreadAllocate, Clone)]
 #[cfg_attr(feature = "std", derive(TypeInfo, StorageLayout, Eq, PartialEq))]
 pub struct Config {
-    pub collection_id: CollectionId,
-    pub gold_token_id: TokenId,
     pub initial_token_id: TokenId,
-    pub initial_hero_health: u32,
+    pub hero_max_health: u32,
     pub initial_hero_stats_range: Range,
     pub enemy_health_range: Range,
     pub enemy_strength_range: Range,
+    pub enemy_gold_drop_range: Range,
     /// Percentage between 0 and 100
     pub enemy_wearing_hat_chance: u32,
     pub hero_goes_first_chance: u32,
+    pub rest_cost: TokenBalance,
     pub potion_cost: TokenBalance,
     pub weapon_cost: TokenBalance,
 }
@@ -25,17 +25,17 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            collection_id: 1000,
-            gold_token_id: 0,
             initial_token_id: 1,
-            initial_hero_health: 15,
+            hero_max_health: 30,
             initial_hero_stats_range: (1, 6).into(),
             enemy_health_range: (10, 30).into(),
             enemy_strength_range: (5, 15).into(),
+            enemy_gold_drop_range: (15, 40).into(),
             enemy_wearing_hat_chance: 40,
             hero_goes_first_chance: 50,
+            rest_cost: 15,
             potion_cost: 50,
-            weapon_cost: 200,
+            weapon_cost: 100,
         }
     }
 }
@@ -43,14 +43,16 @@ impl Default for Config {
 #[derive(Debug, Encode, Decode, Default)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct ConfigMutation {
-    pub initial_hero_health: Option<u32>,
+    pub hero_max_health: Option<u32>,
     pub initial_hero_stats_range: Option<Range>,
-    pub potion_cost: Option<TokenBalance>,
-    pub weapon_cost: Option<TokenBalance>,
     pub enemy_health_range: Option<Range>,
     pub enemy_strength_range: Option<Range>,
+    pub enemy_gold_drop_range: Option<Range>,
     pub enemy_wearing_hat_chance: Option<u32>,
     pub hero_goes_first_chance: Option<u32>,
+    pub rest_cost: Option<TokenBalance>,
+    pub potion_cost: Option<TokenBalance>,
+    pub weapon_cost: Option<TokenBalance>,
 }
 
 impl ConfigMutation {
@@ -65,14 +67,16 @@ impl ConfigMutation {
         }
 
         // set the fields that are `Some`
-        maybe_set_field!(initial_hero_health);
+        maybe_set_field!(hero_max_health);
         maybe_set_field!(initial_hero_stats_range);
-        maybe_set_field!(potion_cost);
-        maybe_set_field!(weapon_cost);
         maybe_set_field!(enemy_health_range);
         maybe_set_field!(enemy_strength_range);
+        maybe_set_field!(enemy_gold_drop_range);
         maybe_set_field!(enemy_wearing_hat_chance);
         maybe_set_field!(hero_goes_first_chance);
+        maybe_set_field!(rest_cost);
+        maybe_set_field!(potion_cost);
+        maybe_set_field!(weapon_cost);
     }
 }
 
@@ -107,8 +111,6 @@ impl From<(u32, u32)> for Range {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode, SpreadLayout, PackedLayout)]
 #[cfg_attr(feature = "std", derive(TypeInfo, StorageLayout))]
 pub struct Hero {
-    /// Max health
-    pub max_health: u32,
     /// Current health
     pub health: u32,
     /// `TokenId` of current weapon
@@ -116,22 +118,29 @@ pub struct Hero {
     /// `TokenId` of current hat
     pub hat_id: Option<TokenId>,
     pub potion_count: u32,
-    pub enemies_defeated_count: u32,
     /// The current battle
     pub battle: Option<Battle>,
+    /// The highest number of battles won in a row achieved by this hero
+    pub highest_consecutive_victory_count: u32,
+    /// The number of battles won in a row, without defeat
+    pub consecutive_victory_count: u32,
 }
 
 impl Hero {
     pub fn new(health: u32, weapon_id: TokenId) -> Self {
         Self {
-            max_health: health,
             health,
             weapon_id,
             hat_id: None,
             potion_count: 0,
-            enemies_defeated_count: 0,
+            highest_consecutive_victory_count: 0,
+            consecutive_victory_count: 0,
             battle: None,
         }
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.health == 0
     }
 }
 
@@ -160,6 +169,12 @@ pub struct Enemy {
     pub health: u32,
     /// Determines the power of a delivered attack
     pub strength: u32,
+}
+
+impl Enemy {
+    pub fn is_dead(&self) -> bool {
+        self.health == 0
+    }
 }
 
 /// One battle per hero

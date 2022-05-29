@@ -4,7 +4,9 @@
 mod mock;
 mod types;
 
-use efinity_contracts::{prelude::*, Freeze, MintRecipient, ReserveIdentifier, TransferRecipient};
+use efinity_contracts::{
+    prelude::*, AccountId, Freeze, MintRecipient, ReserveIdentifier, TransferRecipient,
+};
 use ink::codegen::Env;
 use ink_lang as ink;
 use ink_prelude::vec::Vec;
@@ -26,14 +28,20 @@ mod game {
     #[derive(Debug, PartialEq, Eq, Encode, Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
-        /// The caller is not allowed to call this function
-        NotAllowed,
+        /// The caller does not have permission for this operation
+        NoPermission,
         /// The equipment being equipped is invalid
         InvalidEquipment,
         AttributeDecodeFailed,
         HeroNotFound,
+        /// This operation is not allowed while in battle
+        HeroIsInBattle,
+        /// This operation is only allowed while in battle
         HeroNotInBattle,
+        /// The hero does not have any potions
         HeroHasNoPotions,
+        /// Not enough gold
+        NotEnoughGold,
     }
 
     /// Result type for the game
@@ -45,6 +53,8 @@ mod game {
     pub struct Game {
         config: Config,
         owner: AccountId,
+        collection_id: CollectionId,
+        gold_token_id: TokenId,
         /// The id of the collection used for all tokens
         next_token_id: TokenId,
         random_nonce: u32,
@@ -55,9 +65,16 @@ mod game {
     impl Game {
         /// Create a new game instance
         #[ink(constructor)]
-        pub fn new(config: Config, random_seed: u32) -> Self {
+        pub fn new(
+            config: Config,
+            collection_id: CollectionId,
+            gold_token_id: TokenId,
+            random_seed: u32,
+        ) -> Self {
             ink::utils::initialize_contract(|contract: &mut Self| {
                 contract.owner = Self::env().caller();
+                contract.collection_id = collection_id;
+                contract.gold_token_id = gold_token_id;
                 contract.config = config;
                 contract.random_seed = random_seed;
             })
@@ -75,12 +92,19 @@ mod game {
             self.heroes.get(account_id)
         }
 
+        #[ink(message)]
+        pub fn gold_balance_of(&self, account_id: AccountId) -> TokenBalance {
+            self.env()
+                .extension()
+                .balance_of(self.collection_id, self.gold_token_id, account_id)
+        }
+
         /// Modify the configuration of the game. Only callable by the owner.
         #[ink(message)]
         pub fn mutate_config(&mut self, mutation: ConfigMutation) -> Result<()> {
             // make sure the owner is the caller
             if self.env().caller() != self.owner {
-                return Err(Error::NotAllowed);
+                return Err(Error::NoPermission);
             }
             mutation.apply_to(&mut self.config);
             Ok(())
@@ -102,7 +126,7 @@ mod game {
             );
 
             // create hero with the token we just minted
-            let hero = Hero::new(self.config.initial_hero_health, weapon_id);
+            let hero = Hero::new(self.config.hero_max_health, weapon_id);
             self.heroes.insert(caller, &hero);
             hero
         }
@@ -121,21 +145,49 @@ mod game {
         /// Advance the battle to the next turn
         #[ink(message)]
         pub fn advance_battle(&mut self, command: Command) -> Result<()> {
+            /// Returns true if the battle is over
+            fn battle_is_over(hero: &Hero, battle: &Battle) -> bool {
+                hero.is_dead() || battle.enemy.is_dead()
+            }
+
             let caller = self.env().caller();
             let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
             let mut battle = hero.battle.ok_or(Error::HeroNotInBattle)?;
+            battle.round_number = battle.round_number.saturating_add(1);
 
             let hero_goes_first = self.random_chance(self.config.hero_goes_first_chance);
             if hero_goes_first {
                 self.hero_action(&mut hero, &mut battle, command)?;
-                self.enemy_action()?;
+                if !battle_is_over(&hero, &battle) {
+                    self.enemy_action(&mut hero, &mut battle)?;
+                }
             } else {
-                self.enemy_action()?;
-                self.hero_action(&mut hero, &mut battle, command)?;
+                self.enemy_action(&mut hero, &mut battle)?;
+                if !battle_is_over(&hero, &battle) {
+                    self.hero_action(&mut hero, &mut battle, command)?;
+                }
             }
-            hero.battle = Some(battle);
+            if battle_is_over(&hero, &battle) {
+                hero.battle = None;
+
+                if battle.enemy.is_dead() {
+                    let gold_amount = self.random_in_range(self.config.enemy_gold_drop_range);
+                    self.mint_gold(gold_amount as TokenBalance)
+                }
+                if hero.is_dead() {
+                    hero.health = self.config.hero_max_health;
+                    hero.consecutive_victory_count = 0;
+                }
+            } else {
+                hero.battle = Some(battle);
+            }
             self.heroes.insert(caller, &hero);
             Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_top_heroes(&self) -> Vec<Hero> {
+            todo!();
         }
 
         /// Change the equipment of the caller's hero
@@ -159,6 +211,30 @@ mod game {
         /// Remove the caller's hat
         #[ink(message)]
         pub fn unequip_hat(&mut self) {}
+
+        #[ink(message)]
+        pub fn rest(&mut self) -> Result<()> {
+            let caller = self.env().caller();
+
+            // make sure hero is not in a battle
+            let hero = self.get_hero(caller).ok_or(Error::HeroNotFound)?;
+            if hero.battle.is_some() {
+                return Err(Error::HeroIsInBattle);
+            }
+
+            let gold_balance =
+                self.env()
+                    .extension()
+                    .balance_of(self.collection_id, self.gold_token_id, caller);
+            if gold_balance < self.config.rest_cost {
+                return Err(Error::NotEnoughGold);
+            }
+
+            // burn the gold
+            self.burn_gold(self.config.rest_cost);
+
+            Ok(())
+        }
 
         /// Purchase a healing potion
         #[ink(message)]
@@ -196,8 +272,29 @@ mod game {
             };
             self.env()
                 .extension()
-                .mint(caller, self.config.collection_id, params.clone());
+                .mint(caller, self.collection_id, params.clone());
             token_id
+        }
+
+        fn mint_gold(&mut self, amount: TokenBalance) {
+            let params = MintParams::Mint {
+                token_id: self.gold_token_id,
+                amount,
+                unit_price: None,
+            };
+            self.env()
+                .extension()
+                .mint(self.env().caller(), self.collection_id, params);
+        }
+
+        fn burn_gold(&mut self, amount: TokenBalance) {
+            let params = BurnParams {
+                token_id: self.gold_token_id,
+                amount,
+                keep_alive: false,
+                remove_token_storage: false,
+            };
+            self.env().extension().burn(self.collection_id, params);
         }
 
         fn add_equipment_attribute(
@@ -213,7 +310,7 @@ mod game {
                     .unwrap_or_default(),
             };
             self.env().extension().set_attribute(
-                self.config.collection_id,
+                self.collection_id,
                 Some(token_id),
                 attribute_key(),
                 metadata.encode(),
@@ -255,19 +352,21 @@ mod game {
                     if hero.potion_count == 0 {
                         return Err(Error::HeroHasNoPotions);
                     }
-                    hero.health = hero.max_health;
+                    hero.health = self.config.hero_max_health;
                 }
             }
             Ok(())
         }
 
-        fn enemy_action(&mut self) -> Result<()> {
+        fn enemy_action(&mut self, hero: &mut Hero, battle: &mut Battle) -> Result<()> {
+            let enemy = &mut battle.enemy;
+            hero.health = hero.health.saturating_sub(enemy.strength);
             Ok(())
         }
 
         fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
             if let Some(attribute) = self.env().extension().attribute_of(
-                self.config.collection_id,
+                self.collection_id,
                 Some(token_id),
                 attribute_key(),
             ) {
@@ -326,7 +425,7 @@ mod game {
 
         fn init_game(config: Config) -> Game {
             mock::register_chain_extension();
-            Game::new(config, 0)
+            Game::new(config, 1000, 0, 0)
         }
 
         fn accounts() -> test::DefaultAccounts<EfinityEnvironment> {
@@ -344,8 +443,8 @@ mod game {
         fn test_create_hero() {
             // init game
             let config = Config::default();
-            let collection_id = config.collection_id;
             let mut game = init_game(config);
+            let collection_id = game.collection_id;
 
             // create a hero for bob
             test::set_caller::<EfinityEnvironment>(bob());
@@ -353,6 +452,7 @@ mod game {
 
             // verify the hero's tokens for weapon and armor were minted
             assert_eq!(hero, game.heroes.get(bob()).unwrap());
+
             MOCK_EFINITY.with(|efinity| {
                 let efinity = efinity.borrow();
 
@@ -372,7 +472,7 @@ mod game {
         #[ink::test]
         fn test_mutate_config() {
             let initial_config = Config::default();
-            let mut game = Game::new(initial_config.clone(), 0);
+            let mut game = init_game(initial_config.clone());
             let mutation = ConfigMutation {
                 potion_cost: Some(1000),
                 ..Default::default()
@@ -410,7 +510,7 @@ mod game {
             let attribute = game
                 .env()
                 .extension()
-                .attribute_of(config.collection_id, enemy.hat_id, attribute_key())
+                .attribute_of(game.collection_id, enemy.hat_id, attribute_key())
                 .unwrap();
             let metadata: TokenMetadata = Decode::decode(&mut &attribute.value[..]).unwrap();
             assert_eq!(metadata.token_type, TokenType::Hat);
@@ -440,17 +540,98 @@ mod game {
 
         #[ink::test]
         fn test_advance_battle() {
-            let mut game = init_game(Default::default());
+            // give hero and enemy a lot of health so they don't die
+            let config = Config {
+                hero_max_health: 100,
+                enemy_health_range: (100, 100).into(),
+                ..Default::default()
+            };
+            let mut game = init_game(config);
             game.create_hero();
             game.start_battle().unwrap();
             let initial_enemy = game.get_hero(alice()).unwrap().battle.unwrap().enemy;
-            println!("initial_enemy: {:?}", initial_enemy);
+
+            // make sure attack works
             game.advance_battle(Command::Attack).unwrap();
             let hero = game.get_hero(alice()).unwrap();
             let hero_strength = game.get_metadata(hero.weapon_id).unwrap().unwrap().value;
-            println!("hero_strength: {}", hero_strength);
             let battle = hero.battle.unwrap();
+            assert_eq!(
+                hero.health,
+                game.config.hero_max_health - initial_enemy.strength
+            );
             assert_eq!(battle.enemy.health, initial_enemy.health - hero_strength);
+            assert_eq!(battle.round_number, 1);
+
+            // try to heal without potion fails
+            assert_eq!(
+                game.advance_battle(Command::Heal).unwrap_err(),
+                Error::HeroHasNoPotions
+            );
+
+            // give the hero a potion
+            let mut hero = game.get_hero(alice()).unwrap();
+            let enemy_health = hero.battle.unwrap().enemy.health;
+            hero.health = 50;
+            hero.potion_count = 1;
+            game.heroes.insert(alice(), &hero);
+
+            // now healing works
+            game.advance_battle(Command::Heal).unwrap();
+            let hero = game.get_hero(alice()).unwrap();
+            assert!(hero.health > 50);
+            assert_eq!(hero.battle.unwrap().enemy.health, enemy_health);
+        }
+
+        #[ink::test]
+        fn test_win_battle() {
+            let mut game = init_game(Default::default());
+            game.create_hero();
+            game.start_battle().unwrap();
+
+            // set hero health to 1 less than max health
+            let mut hero = game.get_hero(alice()).unwrap();
+            hero.health = game.config.hero_max_health - 1;
+
+            // set the enemy health to 1
+            let mut battle = hero.battle.unwrap();
+            battle.enemy.health = 1;
+            hero.battle = Some(battle);
+            game.heroes.insert(alice(), &hero);
+
+            // defeat the enemy
+            game.advance_battle(Command::Attack).unwrap();
+
+            // hero health should be set back to max
+            let hero = game.get_hero(alice()).unwrap();
+            assert_ne!(hero.health, game.config.hero_max_health);
+            assert!(hero.battle.is_none());
+
+            // make sure the correct amount of gold is received
+            let gold_amount = game.gold_balance_of(alice());
+            assert!(game.config.enemy_gold_drop_range.contains(gold_amount as _));
+        }
+
+        #[ink::test]
+        fn test_lose_battle() {
+            let mut game = init_game(Default::default());
+            game.create_hero();
+            game.start_battle().unwrap();
+
+            // set hero health to 1 and increase victory count
+            let mut hero = game.get_hero(alice()).unwrap();
+            hero.health = 1;
+            hero.consecutive_victory_count = 5;
+            game.heroes.insert(alice(), &hero);
+
+            // lose the battle
+            game.advance_battle(Command::Attack).unwrap();
+            let mut hero = game.get_hero(alice()).unwrap();
+            assert!(hero.battle.is_none());
+
+            // health and victory count should be reset
+            assert_eq!(hero.health, game.config.hero_max_health);
+            assert_eq!(hero.consecutive_victory_count, 0);
         }
 
         #[ink::test]
@@ -470,6 +651,31 @@ mod game {
             game.equip(weapon_id).unwrap();
             let hero = game.heroes.get(alice()).unwrap();
             assert_eq!(hero.weapon_id, weapon_id);
+        }
+
+        #[ink::test]
+        fn test_rest() {
+            let config = Config {
+                rest_cost: 10,
+                ..Default::default()
+            };
+            let mut game = init_game(config.clone());
+
+            // cannot rest without hero
+            assert_eq!(game.rest(), Err(Error::HeroNotFound));
+
+            // create hero with 1 health
+            let mut hero = game.create_hero();
+            hero.health = 1;
+            game.heroes.insert(alice(), &hero);
+
+            // cant rest if you don't have enough gold
+            assert_eq!(game.rest(), Err(Error::NotEnoughGold));
+
+            // mint gold and then can rest
+            game.mint_gold(config.rest_cost * 2);
+            game.rest().unwrap();
+            assert_eq!(game.gold_balance_of(alice()), 10);
         }
 
         #[test]
