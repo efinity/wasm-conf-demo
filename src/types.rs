@@ -8,9 +8,9 @@ use scale_info::TypeInfo;
 #[derive(Debug, Encode, Decode, SpreadLayout, PackedLayout, SpreadAllocate, Clone)]
 #[cfg_attr(feature = "std", derive(TypeInfo, StorageLayout, Eq, PartialEq))]
 pub struct Config {
-    pub initial_token_id: TokenId,
     pub hero_max_health: u32,
-    pub initial_hero_stats_range: Range,
+    pub starting_weapon_strength_range: Range,
+    pub purchased_weapon_strength_range: Range,
     pub enemy_health_range: Range,
     pub enemy_strength_range: Range,
     pub enemy_gold_drop_range: Range,
@@ -25,9 +25,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            initial_token_id: 1,
             hero_max_health: 30,
-            initial_hero_stats_range: (1, 6).into(),
+            starting_weapon_strength_range: (1, 6).into(),
+            purchased_weapon_strength_range: (3, 8).into(),
             enemy_health_range: (10, 30).into(),
             enemy_strength_range: (5, 15).into(),
             enemy_gold_drop_range: (15, 40).into(),
@@ -44,7 +44,8 @@ impl Default for Config {
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct ConfigMutation {
     pub hero_max_health: Option<u32>,
-    pub initial_hero_stats_range: Option<Range>,
+    pub starting_weapon_strength_range: Option<Range>,
+    pub purchased_weapon_strength_range: Option<Range>,
     pub enemy_health_range: Option<Range>,
     pub enemy_strength_range: Option<Range>,
     pub enemy_gold_drop_range: Option<Range>,
@@ -68,7 +69,8 @@ impl ConfigMutation {
 
         // set the fields that are `Some`
         maybe_set_field!(hero_max_health);
-        maybe_set_field!(initial_hero_stats_range);
+        maybe_set_field!(starting_weapon_strength_range);
+        maybe_set_field!(purchased_weapon_strength_range);
         maybe_set_field!(enemy_health_range);
         maybe_set_field!(enemy_strength_range);
         maybe_set_field!(enemy_gold_drop_range);
@@ -153,11 +155,6 @@ pub enum Command {
     Heal,
 }
 
-pub enum EnemyType {
-    Skeleton,
-    Goblin,
-}
-
 /// An entity that can be fought
 #[derive(
     Debug, Encode, Decode, SpreadLayout, PackedLayout, SpreadAllocate, Copy, Clone, Eq, PartialEq,
@@ -207,9 +204,10 @@ pub enum TokenType {
 }
 
 #[derive(Encode, Decode)]
+#[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct TokenMetadata {
     pub token_type: TokenType,
-    pub value: u32,
+    pub strength: u32,
 }
 
 pub enum WeaponType {

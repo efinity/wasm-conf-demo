@@ -1,6 +1,7 @@
 use crate::{game::tests, AttributeKey, AttributeValue};
 use efinity_contracts::{
-    AccountId, Attribute, Balance, CollectionId, MintParams, TokenBalance, TokenId,
+    AccountId, Attribute, Balance, BurnParams, CollectionId, Freeze, FreezeType, MintParams,
+    TokenBalance, TokenId, TransferParams,
 };
 use ink_env::test;
 use scale::{Decode, Encode};
@@ -8,21 +9,32 @@ use std::{borrow::Borrow, cell::RefCell, collections::HashMap};
 use tests::MOCK_EFINITY;
 
 const MINT: u32 = 1140261079;
+const TRANSFER: u32 = 3795401762;
+const BURN: u32 = 532649603;
 const GET_TOKEN_ACCOUNT_DEPOSIT: u32 = 299862019;
 const SET_ATTRIBUTE: u32 = 2427127331;
 const ATTRIBUTE_OF: u32 = 3842143254;
 const BALANCE_OF: u32 = 1627189794;
+const FREEZE: u32 = 1663653968;
+const THAW: u32 = 885419348;
 
 pub fn register_chain_extension() {
     test::register_chain_extension(MockExtensionFunction::<MINT>);
+    test::register_chain_extension(MockExtensionFunction::<TRANSFER>);
     test::register_chain_extension(MockExtensionFunction::<SET_ATTRIBUTE>);
     test::register_chain_extension(MockExtensionFunction::<GET_TOKEN_ACCOUNT_DEPOSIT>);
     test::register_chain_extension(MockExtensionFunction::<ATTRIBUTE_OF>);
     test::register_chain_extension(MockExtensionFunction::<BALANCE_OF>);
+    test::register_chain_extension(MockExtensionFunction::<BURN>);
+    test::register_chain_extension(MockExtensionFunction::<FREEZE>);
+    test::register_chain_extension(MockExtensionFunction::<THAW>);
 }
 
 #[derive(Default)]
 pub struct MockChainExtension {
+    /// This is a temporary workaround because there doesn't seem to be any way to read the caller
+    /// of the chain extension
+    pub contract_address: AccountId,
     pub attributes: HashMap<(CollectionId, Option<TokenId>, AttributeKey), Attribute>,
     pub tokens: HashMap<(CollectionId, TokenId), Token>,
     pub token_accounts: HashMap<(AccountId, CollectionId, TokenId), TokenAccount>,
@@ -46,6 +58,7 @@ impl MockChainExtension {
                             (collection_id, token_id),
                             Token {
                                 supply: initial_supply,
+                                is_frozen: false,
                             },
                         );
                         self.token_accounts.insert(
@@ -63,13 +76,83 @@ impl MockChainExtension {
                         self.tokens
                             .entry((collection_id, token_id))
                             .and_modify(|x| x.supply += amount)
-                            .or_insert(Token { supply: amount });
+                            .or_insert(Token {
+                                supply: amount,
+                                is_frozen: false,
+                            });
                         self.token_accounts
                             .entry((recipient, collection_id, token_id))
                             .and_modify(|x| x.balance += amount)
                             .or_insert(TokenAccount { balance: amount });
                     }
                 };
+            }
+            BURN => {
+                let (collection_id, params): (CollectionId, BurnParams) =
+                    Decode::decode(&mut &input[1..]).unwrap();
+                let token_account = self
+                    .token_accounts
+                    .get_mut(&(self.contract_address, collection_id, params.token_id))
+                    .expect("token account not found");
+                token_account.balance = token_account.balance.saturating_sub(params.amount);
+
+                let token = self
+                    .tokens
+                    .get_mut(&(collection_id, params.token_id))
+                    .expect("token not found");
+                token.supply = token.supply.saturating_sub(params.amount);
+            }
+            TRANSFER => {
+                let (target, collection_id, params): (AccountId, CollectionId, TransferParams) =
+                    Decode::decode(&mut &input[1..]).unwrap();
+                let (token_id, source, amount) = match params {
+                    TransferParams::Simple {
+                        token_id, amount, ..
+                    } => (token_id, self.contract_address, amount),
+                    TransferParams::Operator {
+                        token_id,
+                        source,
+                        amount,
+                        ..
+                    } => (token_id, source, amount),
+                };
+                {
+                    let source_account = self
+                        .token_accounts
+                        .get_mut(&(source, collection_id, token_id))
+                        .unwrap();
+                    source_account.balance = source_account.balance.saturating_sub(amount);
+                }
+                self.token_accounts
+                    .entry((target, collection_id, token_id))
+                    .and_modify(|x| x.balance = x.balance.saturating_add(amount))
+                    .or_insert(TokenAccount { balance: amount });
+            }
+            FREEZE => {
+                let freeze: Freeze = Decode::decode(&mut &input[1..]).unwrap();
+                match freeze.freeze_type {
+                    FreezeType::Token(token_id) => {
+                        let token = self
+                            .tokens
+                            .get_mut(&(freeze.collection_id, token_id))
+                            .expect("token not found");
+                        token.is_frozen = true;
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+            THAW => {
+                let freeze: Freeze = Decode::decode(&mut &input[1..]).unwrap();
+                match freeze.freeze_type {
+                    FreezeType::Token(token_id) => {
+                        let token = self
+                            .tokens
+                            .get_mut(&(freeze.collection_id, token_id))
+                            .expect("token not found");
+                        token.is_frozen = false;
+                    }
+                    _ => unimplemented!(),
+                }
             }
             SET_ATTRIBUTE => {
                 let (collection_id, token_id, key, value): (
@@ -94,6 +177,7 @@ impl MockChainExtension {
                 Encode::encode_to(&attribute, output);
             }
             BALANCE_OF => {
+                // I don't know why this one must start at 2
                 let (collection_id, token_id, account_id): (CollectionId, TokenId, AccountId) =
                     Decode::decode(&mut &input[2..]).unwrap();
                 let balance = self.balance_of(collection_id, token_id, account_id);
@@ -153,6 +237,7 @@ impl<const FUNCTION_ID: u32> test::ChainExtension for MockExtensionFunction<FUNC
 
 pub struct Token {
     pub supply: Balance,
+    pub is_frozen: bool,
 }
 
 #[derive(Debug)]
