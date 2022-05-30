@@ -148,6 +148,20 @@ mod game {
             })
         }
 
+        /// Transfer ownership of the contract to `new_owner`
+        #[ink(message)]
+        pub fn transfer_contract_ownership(&mut self, new_owner: AccountId) -> Result<()> {
+            // make sure the owner is the caller
+            if self.env().caller() != self.owner {
+                return Err(Error::NoPermission);
+            }
+
+            // change the owner
+            self.owner = new_owner;
+
+            Ok(())
+        }
+
         /// Modify the configuration of the game. Only callable by the owner.
         #[ink(message)]
         pub fn mutate_config(&mut self, mutation: ConfigMutation) -> Result<()> {
@@ -160,6 +174,12 @@ mod game {
             mutation.apply_to(&mut self.config);
 
             Ok(())
+        }
+
+        /// Returns the game's config
+        #[ink(message)]
+        pub fn get_config(&self) -> Config {
+            self.config.clone()
         }
 
         /// Create a hero for the caller
@@ -337,6 +357,12 @@ mod game {
             Ok(())
         }
 
+        /// Returns the `Hero` for `account_id` if it exists
+        #[ink(message)]
+        pub fn get_hero(&self, account_id: AccountId) -> Option<Hero> {
+            self.heroes.get(account_id)
+        }
+
         /// Equip `token_id` for the caller
         #[ink(message)]
         pub fn equip(&mut self, token_id: TokenId) -> Result<()> {
@@ -418,20 +444,21 @@ mod game {
             Ok(())
         }
 
-        /// Recover the caller to full health. Can only be done outside of battle.
+        /// Returns the `TokenMetadata` for `token_id` if it exists
         #[ink(message)]
-        pub fn rest(&mut self) -> Result<()> {
-            let caller = self.env().caller();
-            let mut hero = self.spend_gold(self.config.rest_cost)?;
-
-            // set health to max
-            hero.health = self.config.hero_max_health;
-            self.heroes.insert(self.env().caller(), &hero);
-
-            // emit event
-            self.env().emit_event(Rested { hero_id: caller });
-
-            Ok(())
+        pub fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
+            if let Some(attribute) = self.env().extension().attribute_of(
+                self.collection_id,
+                Some(token_id),
+                attribute_key(),
+            ) {
+                Ok(Some(
+                    Decode::decode(&mut &attribute.value[..])
+                        .map_err(|_| Error::AttributeDecodeFailed)?,
+                ))
+            } else {
+                Ok(None)
+            }
         }
 
         /// Purchase a healing potion. Can only be done outside of battle.
@@ -470,35 +497,20 @@ mod game {
             Ok(token_id)
         }
 
-        // read-only
-
-        /// Returns the game's config
+        /// Recover the caller to full health. Can only be done outside of battle.
         #[ink(message)]
-        pub fn get_config(&self) -> Config {
-            self.config.clone()
-        }
+        pub fn rest(&mut self) -> Result<()> {
+            let caller = self.env().caller();
+            let mut hero = self.spend_gold(self.config.rest_cost)?;
 
-        /// Returns the `Hero` for `account_id` if it exists
-        #[ink(message)]
-        pub fn get_hero(&self, account_id: AccountId) -> Option<Hero> {
-            self.heroes.get(account_id)
-        }
+            // set health to max
+            hero.health = self.config.hero_max_health;
+            self.heroes.insert(self.env().caller(), &hero);
 
-        /// Returns the `TokenMetadata` for `token_id` if it exists
-        #[ink(message)]
-        pub fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
-            if let Some(attribute) = self.env().extension().attribute_of(
-                self.collection_id,
-                Some(token_id),
-                attribute_key(),
-            ) {
-                Ok(Some(
-                    Decode::decode(&mut &attribute.value[..])
-                        .map_err(|_| Error::AttributeDecodeFailed)?,
-                ))
-            } else {
-                Ok(None)
-            }
+            // emit event
+            self.env().emit_event(Rested { hero_id: caller });
+
+            Ok(())
         }
 
         /// Returns the balance of gold for `account_id`
@@ -786,7 +798,7 @@ mod game {
                 potion_cost: Some(1000),
                 ..Default::default()
             };
-            game.mutate_config(mutation).unwrap();
+            game.mutate_config(mutation.clone()).unwrap();
             let mut config = game.get_config();
 
             // make sure the potion cost changed
@@ -795,6 +807,30 @@ mod game {
             // if we change the potion cost back, everything else should be the same
             config.potion_cost = initial_config.potion_cost;
             assert_eq!(initial_config, config);
+
+            // bob cannot change the config
+            test::set_caller::<EfinityEnvironment>(bob());
+            assert_eq!(game.mutate_config(mutation), Err(Error::NoPermission));
+        }
+
+        /// Test `transfer_contract_ownership` function
+        #[ink::test]
+        fn test_transfer_contract_ownership() {
+            let initial_config = Config::default();
+            let mut game = init_game(initial_config.clone());
+
+            // alice is the owner
+            assert_eq!(game.owner, alice());
+
+            // alice transfers to bob. Now he's the owner.
+            game.transfer_contract_ownership(bob()).unwrap();
+            assert_eq!(game.owner, bob());
+
+            // alice cannot transfer ownership any more
+            assert_eq!(
+                game.transfer_contract_ownership(alice()),
+                Err(Error::NoPermission)
+            );
         }
 
         /// Test `start_battle` function

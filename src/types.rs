@@ -87,7 +87,7 @@ impl Default for Config {
 }
 
 /// Can be used to update config values. See config docs for info on each field.
-#[derive(Debug, Encode, Decode, Default)]
+#[derive(Debug, Encode, Decode, Default, Clone)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct ConfigMutation {
     pub hero_max_health: Option<u32>,
