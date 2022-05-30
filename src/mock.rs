@@ -1,3 +1,5 @@
+//! This is a temporary mock for the chain extension. This will be moved to a separate repository.
+
 use crate::{game::tests, AttributeKey, AttributeValue};
 use efinity_contracts::{
     AccountId, Attribute, Balance, BurnParams, CollectionId, Freeze, FreezeType, MintParams,
@@ -7,6 +9,8 @@ use ink_env::test;
 use scale::{Decode, Encode};
 use std::collections::HashMap;
 use tests::MOCK_EFINITY;
+
+// function ids
 
 const MINT: u32 = 1140261079;
 const TRANSFER: u32 = 3795401762;
@@ -18,6 +22,7 @@ const BALANCE_OF: u32 = 1627189794;
 const FREEZE: u32 = 1663653968;
 const THAW: u32 = 885419348;
 
+/// Register each chain extension function
 pub fn register_chain_extension() {
     test::register_chain_extension(MockExtensionFunction::<MINT>);
     test::register_chain_extension(MockExtensionFunction::<TRANSFER>);
@@ -32,8 +37,8 @@ pub fn register_chain_extension() {
 
 #[derive(Default)]
 pub struct MockChainExtension {
-    /// This is a temporary workaround because there doesn't seem to be any way to read the caller
-    /// of the chain extension
+    /// This is a temporary workaround because there doesn't seem to be any way to read the contract
+    /// address of the chain extension
     pub contract_address: AccountId,
     pub attributes: HashMap<(CollectionId, Option<TokenId>, AttributeKey), Attribute>,
     pub tokens: HashMap<(CollectionId, TokenId), Token>,
@@ -239,11 +244,13 @@ impl<const FUNCTION_ID: u32> test::ChainExtension for MockExtensionFunction<FUNC
     }
 }
 
+/// A mock token
 pub struct Token {
     pub supply: Balance,
     pub is_frozen: bool,
 }
 
+/// A mock token account
 #[derive(Debug)]
 pub struct TokenAccount {
     pub balance: Balance,

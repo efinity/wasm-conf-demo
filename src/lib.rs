@@ -427,6 +427,12 @@ mod game {
                 hero.hat_id = None;
                 self.heroes.insert(caller, &hero);
 
+                // thaw the hat
+                self.env().extension().thaw(Freeze {
+                    collection_id: self.collection_id,
+                    freeze_type: FreezeType::Token(hat_id),
+                });
+
                 // emit event
                 self.env().emit_event(EquipmentChanged {
                     hero_id: caller,
@@ -532,12 +538,14 @@ mod game {
 
     // helper functions
     impl Game {
+        /// Returns the current token id and increments `next_token_id`
         fn increment_next_token_id(&mut self) -> TokenId {
             let token_id = self.next_token_id;
             self.next_token_id += 1;
             token_id
         }
 
+        /// Mints a non-fungible token to `recipient`. Freezes it if `freeze` is true.
         fn mint_nft(&mut self, recipient: AccountId, freeze: bool) -> TokenId {
             let token_id = self.increment_next_token_id();
             let params = MintParams::CreateToken {
@@ -558,6 +566,7 @@ mod game {
             token_id
         }
 
+        /// Mints `amount` gold to the caller
         fn mint_gold(&mut self, amount: TokenBalance) {
             let params = MintParams::Mint {
                 token_id: self.gold_token_id,
@@ -569,13 +578,15 @@ mod game {
                 .mint(self.env().caller(), self.collection_id, params);
         }
 
+        /// Adds `TokenMetadata` to `token_id` and sets `token_type`. Generates strength value if `strength_range` is
+        /// Some. Returns the generated strength.
         fn add_equipment_attribute(
             &mut self,
             token_id: TokenId,
             token_type: TokenType,
-            value_range: Option<Range>,
+            strength_range: Option<Range>,
         ) -> u32 {
-            let strength = value_range
+            let strength = strength_range
                 .map(|x| self.random_in_range(x))
                 .unwrap_or_default();
             let metadata = TokenMetadata {
@@ -591,7 +602,8 @@ mod game {
             strength
         }
 
-        fn spend_gold(&mut self, cost: TokenBalance) -> Result<Hero> {
+        /// Spends `amount` gold from the caller's account. Returns the hero.
+        fn spend_gold(&mut self, amount: TokenBalance) -> Result<Hero> {
             let caller = self.env().caller();
 
             // make sure hero is not in a battle
@@ -605,7 +617,7 @@ mod game {
                 self.env()
                     .extension()
                     .balance_of(self.collection_id, self.gold_token_id, caller);
-            if gold_balance < cost {
+            if gold_balance < amount {
                 return Err(Error::NotEnoughGold);
             }
 
@@ -616,7 +628,7 @@ mod game {
                 TransferParams::Operator {
                     token_id: self.gold_token_id,
                     source: self.env().caller(),
-                    amount: cost,
+                    amount,
                     keep_alive: true,
                 },
             );
@@ -624,7 +636,7 @@ mod game {
             // burn the token units
             let params = BurnParams {
                 token_id: self.gold_token_id,
-                amount: cost,
+                amount,
                 keep_alive: false,
                 remove_token_storage: false,
             };
@@ -633,6 +645,7 @@ mod game {
             Ok(hero)
         }
 
+        /// Handles `hero`'s action in `battle`, according to `command`.
         fn hero_action(
             &mut self,
             hero: &mut Hero,
@@ -658,6 +671,7 @@ mod game {
             Ok(())
         }
 
+        /// Handles enemy's action in `battle` with `hero`.
         fn enemy_action(&mut self, hero: &mut Hero, battle: &mut Battle) -> Result<()> {
             let enemy = &mut battle.enemy;
             let attack_power = self.calculate_attack_power(enemy.strength);
@@ -665,6 +679,7 @@ mod game {
             Ok(())
         }
 
+        /// Computes a random number in `range`
         fn random_in_range(&mut self, range: Range) -> u32 {
             // create the subject
             let mut subject = [0_u8; 12];
@@ -687,10 +702,12 @@ mod game {
             lerp(range.start, range.end, random_number)
         }
 
+        /// Generates a random number between 1 and 100. Returns true if this number is less than chance.
         fn random_chance(&mut self, chance: u32) -> bool {
             self.random_in_range((0, 100).into()) <= chance
         }
 
+        /// Calculates attack power for strength, taking into account the config's attack variance.
         fn calculate_attack_power(&mut self, strength: u32) -> u32 {
             // this is a workaround because random_in_range supports unsigned only
             let unsigned_variance =
@@ -708,7 +725,6 @@ mod game {
         let fraction = input / u32::MAX as u64;
         let length: u64 = b as u64 - a as u64;
         let output = ((fraction * length) / PRECISION) + a as u64;
-        // println!("a: {}, b: {}, t: {}, output: {}", a, b, t, output);
         output as u32
     }
 
@@ -721,9 +737,11 @@ mod game {
         use std::cell::RefCell;
 
         thread_local! {
+            /// Mock of efinity chain extension
             pub static MOCK_EFINITY: RefCell<MockChainExtension> = RefCell::new(Default::default());
         }
 
+        /// Set up the game for tests
         fn init_game(config: Config) -> Game {
             mock::register_chain_extension();
             let game = Game::new(1000, 0, 1, 0, Some(config));
@@ -733,17 +751,22 @@ mod game {
             game
         }
 
+        /// Helper function to get default accounts
         fn accounts() -> test::DefaultAccounts<EfinityEnvironment> {
             test::default_accounts()
         }
+
+        /// Alice's account id
         fn alice() -> AccountId {
             accounts().alice
         }
+
+        /// Bob's account id
         fn bob() -> AccountId {
             accounts().bob
         }
 
-        /// Test that the `create_hero` function is working
+        /// Test `create_hero` function
         #[ink::test]
         fn test_create_hero() {
             // init game
@@ -780,6 +803,7 @@ mod game {
             })
         }
 
+        /// Test `mutate_config` function
         #[ink::test]
         fn test_mutate_config() {
             let initial_config = Config::default();
@@ -799,6 +823,7 @@ mod game {
             assert_eq!(initial_config, config);
         }
 
+        /// Test `start_battle` function
         #[ink::test]
         fn test_start_battle() {
             let config = Config {
@@ -845,6 +870,7 @@ mod game {
             assert!(enemy.hat_id.is_none());
         }
 
+        /// Test `advance_battle` function
         #[ink::test]
         fn test_advance_battle() {
             // give hero and enemy a lot of health so they don't die
@@ -902,6 +928,7 @@ mod game {
             assert_eq!(hero.battle.unwrap().enemy.health, enemy_health);
         }
 
+        /// Test `advance_battle` where the hero wins
         #[ink::test]
         fn test_win_battle() {
             let config = Config {
@@ -954,6 +981,7 @@ mod game {
             );
         }
 
+        /// Test `advance_battle` where the hero loses
         #[ink::test]
         fn test_lose_battle() {
             let mut game = init_game(Config {
@@ -1000,8 +1028,9 @@ mod game {
             );
         }
 
+        /// Test `equip` function
         #[ink::test]
-        fn test_set_hero_equipment() {
+        fn test_equip() {
             let mut game = init_game(Default::default());
             let hero = game.create_hero();
             let initial_weapon_id = hero.weapon_id;
@@ -1041,6 +1070,41 @@ mod game {
             assert_eq!(hero.weapon_id, new_weapon_id);
         }
 
+        /// Test `unequip_hat` function
+        #[ink::test]
+        fn test_unequip_hat() {
+            let mut game = init_game(Default::default());
+            game.create_hero();
+
+            // equip a hat
+            let hat_id = game.mint_nft(alice(), false);
+            game.add_equipment_attribute(hat_id, TokenType::Hat, None);
+            game.equip(hat_id).unwrap();
+
+            // hero should be wearing the hat
+            let hero = game.heroes.get(alice()).unwrap();
+            assert_eq!(hero.hat_id.unwrap(), hat_id);
+
+            // unequip the hat
+            game.unequip_hat().unwrap();
+
+            // hero should not be wearing it
+            let hero = game.heroes.get(alice()).unwrap();
+            assert!(hero.hat_id.is_none());
+
+            // make sure the hat is not frozen
+            MOCK_EFINITY.with(|efinity| {
+                assert!(
+                    !efinity
+                        .borrow()
+                        .token_of(game.collection_id, hat_id)
+                        .unwrap()
+                        .is_frozen
+                );
+            });
+        }
+
+        /// Test `rest` function
         #[ink::test]
         fn test_rest() {
             let config = Config {
@@ -1071,6 +1135,7 @@ mod game {
             );
         }
 
+        /// Test `buy_potion` function
         #[ink::test]
         fn test_buy_potion() {
             let config = Config {
@@ -1096,6 +1161,7 @@ mod game {
             assert_eq!(game.get_hero(alice()).unwrap().potion_count, 2);
         }
 
+        /// Test `buy_weapon` function
         #[ink::test]
         fn test_buy_weapon() {
             let config = Config {
@@ -1123,6 +1189,7 @@ mod game {
                 .contains(metadata.strength));
         }
 
+        /// Test `calculate_attack_power` function
         #[ink::test]
         fn test_calculate_attack_power() {
             fn new_game_with_attack_variance(attack_variance: u32) -> Game {
@@ -1151,6 +1218,7 @@ mod game {
             }
         }
 
+        /// Test `lerp` function
         #[test]
         fn test_lerp() {
             assert_eq!(lerp(0, 100, u32::MAX), 100);
@@ -1159,6 +1227,7 @@ mod game {
             assert_eq!(lerp(5, 100, 0), 5);
         }
 
+        /// Test `Range` type
         #[test]
         fn test_range() {
             let range = Range { start: 5, end: 10 };

@@ -5,28 +5,39 @@ use scale_info::TypeInfo;
 
 // Game
 
+/// Coniguration values for the game
 #[derive(Debug, Encode, Decode, SpreadLayout, PackedLayout, SpreadAllocate, Clone)]
 #[cfg_attr(
     feature = "std",
     derive(TypeInfo, ink_storage::traits::StorageLayout, Eq, PartialEq)
 )]
 pub struct Config {
+    /// Max health of the hero
     pub hero_max_health: u32,
+    /// Strength range of the weapon the hero starts with
     pub starting_weapon_strength_range: Range,
+    /// Strength range of a weapon that is bought
     pub purchased_weapon_strength_range: Range,
     /// The number of potions a hero starts with
     pub hero_initial_potion_count: u32,
+    /// Health range of enemies
     pub enemy_health_range: Range,
+    /// Strength range of enemies
     pub enemy_strength_range: Range,
+    /// Range of amount of gold enemies drop
     pub enemy_gold_drop_range: Range,
     /// An attack will randomly be plus or minus this number or less
     /// For example, if it's 2, all attacks will be strength plus or minus 2, 1, or 0
     pub attack_variance: u32,
-    /// Percentage between 0 and 100
+    /// Percentage of chance enemy will be wearing a hat
     pub enemy_wearing_hat_chance: u32,
+    /// Percentage of chance the hero will go first each round in battle
     pub hero_goes_first_chance: u32,
+    /// Cost in gold of resting
     pub rest_cost: TokenBalance,
+    /// Cost in gold of a potion
     pub potion_cost: TokenBalance,
+    /// Cost in gold of a weapon
     pub weapon_cost: TokenBalance,
 }
 
@@ -50,6 +61,7 @@ impl Default for Config {
     }
 }
 
+/// Can be used to update config values. See config docs for info on each field.
 #[derive(Debug, Encode, Decode, Default)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct ConfigMutation {
@@ -68,6 +80,7 @@ pub struct ConfigMutation {
 }
 
 impl ConfigMutation {
+    /// Applies the mutation to `config`
     pub fn apply_to(self, config: &mut Config) {
         /// Set the field on `config` if it is `Some` on `self`
         macro_rules! maybe_set_field {
@@ -100,14 +113,18 @@ impl ConfigMutation {
 )]
 #[cfg_attr(feature = "std", derive(TypeInfo, ink_storage::traits::StorageLayout))]
 pub struct Range {
+    /// The start of the range
     pub start: u32,
+    /// The end of a range
     pub end: u32,
 }
 
 impl Range {
+    /// Create a new range
     pub fn new(start: u32, end: u32) -> Self {
         Self { start, end }
     }
+    /// True if `value` is between `start` and `end`, inclusive
     pub fn contains(&self, value: u32) -> bool {
         value >= self.start && value <= self.end
     }
@@ -130,12 +147,13 @@ impl From<(u32, u32)> for Range {
 pub struct Hero {
     /// Current health
     pub health: u32,
-    /// `TokenId` of current weapon
+    /// `TokenId` of the hero's equipped weapon
     pub weapon_id: TokenId,
-    /// `TokenId` of current hat
+    /// `TokenId` of the hero's equipped hat
     pub hat_id: Option<TokenId>,
+    /// The number of potions the hero has
     pub potion_count: u32,
-    /// The current battle
+    /// The current battle the hero is engaged in
     pub battle: Option<Battle>,
     /// The highest number of battles won in a row achieved by this hero
     pub highest_consecutive_victory_count: u32,
@@ -144,6 +162,7 @@ pub struct Hero {
 }
 
 impl Hero {
+    /// Create a new hero
     pub fn new(health: u32, weapon_id: TokenId, potion_count: u32) -> Self {
         Self {
             health,
@@ -156,6 +175,7 @@ impl Hero {
         }
     }
 
+    /// Returns true if the hero has no health
     pub fn is_dead(&self) -> bool {
         self.health == 0
     }
@@ -164,9 +184,9 @@ impl Hero {
 /// An action that can be taken in battle
 #[derive(Encode, Decode, TypeInfo)]
 pub enum Command {
-    /// Deliver damage
+    /// Damage the enemy
     Attack,
-    /// Recover damage received
+    /// Recover health to maximum
     Heal,
 }
 
@@ -176,6 +196,7 @@ pub enum Command {
 )]
 #[cfg_attr(feature = "std", derive(TypeInfo, ink_storage::traits::StorageLayout))]
 pub struct Enemy {
+    /// The token id of the hat the enemy is wearing
     pub hat_id: Option<TokenId>,
     /// Remaining health
     pub health: u32,
@@ -184,6 +205,7 @@ pub struct Enemy {
 }
 
 impl Enemy {
+    /// Returns true if the enemy has no health
     pub fn is_dead(&self) -> bool {
         self.health == 0
     }
@@ -195,11 +217,14 @@ impl Enemy {
 )]
 #[cfg_attr(feature = "std", derive(TypeInfo, ink_storage::traits::StorageLayout))]
 pub struct Battle {
+    /// The current round number of this battle
     pub round_number: u32,
+    /// The enemy involved in this battle
     pub enemy: Enemy,
 }
 
 impl Battle {
+    /// Create a new battle
     pub fn new(enemy: Enemy) -> Self {
         Self {
             round_number: 0,
@@ -210,17 +235,23 @@ impl Battle {
 
 // Tokens
 
+/// A type that a token can be
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 #[repr(u8)]
 pub enum TokenType {
+    /// The token is a weapon
     Weapon,
+    /// The token is a hat
     Hat,
 }
 
+/// Metadata stored for the token as an attribute
 #[derive(Encode, Decode)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct TokenMetadata {
+    /// The type of the token
     pub token_type: TokenType,
+    /// The strength of the token, or 0 if it has no strength
     pub strength: u32,
 }
