@@ -4,10 +4,11 @@
 mod mock;
 mod types;
 
-use efinity_contracts::{prelude::*, Freeze};
+use efinity_contracts::{prelude::*, Freeze, FreezeType};
 use ink::codegen::Env;
 use ink_lang as ink;
 use ink_storage::{traits::SpreadAllocate, Mapping};
+use scale::{Decode, Encode};
 use types::*;
 
 /// The attribute key used for equipment
@@ -15,12 +16,35 @@ fn attribute_key() -> AttributeKey {
     b"equipment".to_vec()
 }
 
+/// Error types for the game
+#[derive(Debug, PartialEq, Eq, Encode, Decode)]
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum Error {
+    /// The caller does not have permission for this operation
+    NoPermission,
+    /// The equipment being equipped is invalid
+    InvalidEquipment,
+    /// The attribute could not be decoded
+    AttributeDecodeFailed,
+    /// A hero does not exist for the provided account id
+    HeroNotFound,
+    /// This operation is not allowed while in battle
+    HeroIsInBattle,
+    /// This operation is only allowed while in battle
+    HeroNotInBattle,
+    /// The hero does not have any potions
+    HeroHasNoPotions,
+    /// The provided account id does not have enough gold
+    NotEnoughGold,
+}
+
+/// Result type for the game
+pub type Result<T> = core::result::Result<T, Error>;
+
 /// Multi-Tokens example smart contract
 #[ink::contract(env = EfinityEnvironment)]
 mod game {
     use super::*;
-    use efinity_contracts::FreezeType;
-    use scale::{Decode, Encode};
 
     /// A hero was created
     #[ink(event)]
@@ -94,31 +118,6 @@ mod game {
         /// True if it was equipped, false if it was unequipped
         pub equipped: bool,
     }
-
-    /// Error types for the game
-    #[derive(Debug, PartialEq, Eq, Encode, Decode)]
-    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
-    pub enum Error {
-        /// The caller does not have permission for this operation
-        NoPermission,
-        /// The equipment being equipped is invalid
-        InvalidEquipment,
-        /// The attribute could not be decoded
-        AttributeDecodeFailed,
-        /// A hero does not exist for the provided account id
-        HeroNotFound,
-        /// This operation is not allowed while in battle
-        HeroIsInBattle,
-        /// This operation is only allowed while in battle
-        HeroNotInBattle,
-        /// The hero does not have any potions
-        HeroHasNoPotions,
-        /// The provided account id does not have enough gold
-        NotEnoughGold,
-    }
-
-    /// Result type for the game
-    pub type Result<T> = core::result::Result<T, Error>;
 
     /// The storage for this contract
     #[ink(storage)]
