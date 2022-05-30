@@ -7,7 +7,6 @@ mod types;
 use efinity_contracts::{prelude::*, Freeze};
 use ink::codegen::Env;
 use ink_lang as ink;
-use ink_prelude::vec::Vec;
 use ink_storage::{traits::SpreadAllocate, Mapping};
 use types::*;
 
@@ -243,8 +242,15 @@ mod game {
                 hero.battle = None;
 
                 if battle.enemy.is_dead() {
+                    hero.consecutive_victory_count =
+                        hero.consecutive_victory_count.saturating_add(1);
+                    if hero.highest_consecutive_victory_count < hero.consecutive_victory_count {
+                        hero.highest_consecutive_victory_count = hero.consecutive_victory_count;
+                    }
                     let gold_amount = self.random_in_range(self.config.enemy_gold_drop_range);
                     self.mint_gold(gold_amount as TokenBalance);
+
+                    // transfer the hat to the hero if it exists
                     if let Some(hat_id) = battle.enemy.hat_id {
                         self.env().extension().transfer(
                             caller,
@@ -260,6 +266,19 @@ mod game {
                 if hero.is_dead() {
                     hero.health = self.config.hero_max_health;
                     hero.consecutive_victory_count = 0;
+
+                    // burn the enemy's hat if it won the battle with it
+                    if let Some(hat_id) = battle.enemy.hat_id {
+                        self.env().extension().burn(
+                            self.collection_id,
+                            BurnParams {
+                                token_id: hat_id,
+                                amount: 1,
+                                keep_alive: false,
+                                remove_token_storage: true,
+                            },
+                        );
+                    }
                 }
 
                 self.env().emit_event(BattleEnded {
@@ -271,11 +290,6 @@ mod game {
             }
             self.heroes.insert(caller, &hero);
             Ok(())
-        }
-
-        #[ink(message)]
-        pub fn get_top_heroes(&self) -> Vec<Hero> {
-            todo!();
         }
 
         /// Change the equipment of the caller's hero
@@ -324,7 +338,17 @@ mod game {
 
         /// Remove the caller's hat
         #[ink(message)]
-        pub fn unequip_hat(&mut self) {}
+        pub fn unequip_hat(&mut self) -> Result<()> {
+            let caller = self.env().caller();
+            let mut hero = self
+                .get_hero(self.env().caller())
+                .ok_or(Error::HeroNotFound)?;
+            if hero.hat_id.is_some() {
+                hero.hat_id = None;
+                self.heroes.insert(caller, &hero);
+            }
+            Ok(())
+        }
 
         #[ink(message)]
         pub fn rest(&mut self) -> Result<()> {
@@ -409,29 +433,6 @@ mod game {
                 .mint(self.env().caller(), self.collection_id, params);
         }
 
-        fn burn_gold(&mut self, amount: TokenBalance) {
-            // transfer gold to the contract
-            self.env().extension().transfer(
-                self.env().account_id(),
-                self.collection_id,
-                TransferParams::Operator {
-                    token_id: self.gold_token_id,
-                    source: self.env().caller(),
-                    amount: 1,
-                    keep_alive: false,
-                },
-            );
-
-            // burn the token units
-            let params = BurnParams {
-                token_id: self.gold_token_id,
-                amount,
-                keep_alive: false,
-                remove_token_storage: false,
-            };
-            self.env().extension().burn(self.collection_id, params);
-        }
-
         fn add_equipment_attribute(
             &mut self,
             token_id: TokenId,
@@ -472,8 +473,26 @@ mod game {
                 return Err(Error::NotEnoughGold);
             }
 
-            // burn the gold being spent
-            self.burn_gold(cost);
+            // transfer gold to the contract
+            self.env().extension().transfer(
+                self.env().account_id(),
+                self.collection_id,
+                TransferParams::Operator {
+                    token_id: self.gold_token_id,
+                    source: self.env().caller(),
+                    amount: cost,
+                    keep_alive: true,
+                },
+            );
+
+            // burn the token units
+            let params = BurnParams {
+                token_id: self.gold_token_id,
+                amount: cost,
+                keep_alive: false,
+                remove_token_storage: false,
+            };
+            self.env().extension().burn(self.collection_id, params);
 
             Ok(hero)
         }
@@ -799,6 +818,10 @@ mod game {
             // defeat the enemy
             game.advance_battle(Command::Attack).unwrap();
 
+            let hero = game.get_hero(caller).unwrap();
+            assert_eq!(hero.consecutive_victory_count, 1);
+            assert_eq!(hero.highest_consecutive_victory_count, 1);
+
             // make sure the correct amount of gold is received
             let gold_amount = game.get_gold_balance(caller);
             assert!(game.config.enemy_gold_drop_range.contains(gold_amount as _));
@@ -815,7 +838,10 @@ mod game {
 
         #[ink::test]
         fn test_lose_battle() {
-            let mut game = init_game(Default::default());
+            let mut game = init_game(Config {
+                enemy_wearing_hat_chance: 100,
+                ..Default::default()
+            });
             game.create_hero();
             game.start_battle().unwrap();
 
@@ -825,6 +851,17 @@ mod game {
             hero.consecutive_victory_count = 5;
             game.heroes.insert(alice(), &hero);
 
+            // the hat token exists
+            let hat_id = hero.battle.unwrap().enemy.hat_id.unwrap();
+            assert_eq!(
+                game.env().extension().balance_of(
+                    game.collection_id,
+                    hat_id,
+                    game.env().account_id()
+                ),
+                1
+            );
+
             // lose the battle
             game.advance_battle(Command::Attack).unwrap();
             let hero = game.get_hero(alice()).unwrap();
@@ -833,6 +870,16 @@ mod game {
             // health and victory count should be reset
             assert_eq!(hero.health, game.config.hero_max_health);
             assert_eq!(hero.consecutive_victory_count, 0);
+
+            // the hat token was burned
+            assert_eq!(
+                game.env().extension().balance_of(
+                    game.collection_id,
+                    hat_id,
+                    game.env().account_id()
+                ),
+                0
+            );
         }
 
         #[ink::test]

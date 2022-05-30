@@ -33,19 +33,19 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hero_max_health: 30,
-            starting_weapon_strength_range: (3, 8).into(),
-            purchased_weapon_strength_range: (6, 11).into(),
-            hero_initial_potion_count: 1,
-            enemy_health_range: (15, 35).into(),
+            hero_max_health: 50,
+            starting_weapon_strength_range: (5, 10).into(),
+            purchased_weapon_strength_range: (6, 13).into(),
+            hero_initial_potion_count: 2,
+            enemy_health_range: (30, 60).into(),
             enemy_strength_range: (5, 15).into(),
-            enemy_gold_drop_range: (15, 40).into(),
+            enemy_gold_drop_range: (20, 50).into(),
             attack_variance: 2,
             enemy_wearing_hat_chance: 35,
             hero_goes_first_chance: 50,
             rest_cost: 15,
             potion_cost: 50,
-            weapon_cost: 100,
+            weapon_cost: 125,
         }
     }
 }
