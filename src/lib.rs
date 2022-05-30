@@ -22,33 +22,77 @@ mod game {
     use efinity_contracts::FreezeType;
     use scale::{Decode, Encode};
 
+    /// A hero was created
     #[ink(event)]
     pub struct HeroCreated {
-        pub account_id: AccountId,
+        /// The `AccountId` of the hero
+        pub hero_id: AccountId,
+        /// The `TokenId` of the weapon
         pub weapon_id: TokenId,
+        /// The strength of the weapon
         pub weapon_strength: u32,
     }
 
+    /// A battle was started
     #[ink(event)]
-    pub struct WeaponPurchased {
-        pub token_id: TokenId,
-        pub strength: u32,
+    pub struct BattleStarted {
+        /// The `AccountId` of the hero
+        pub hero_id: AccountId,
+        /// The enemy generated for this battle
+        pub enemy: Enemy,
     }
 
+    /// The battle was advanced by a round
     #[ink(event)]
     pub struct BattleAdvanced {
+        /// The `AccountId` of the hero
         pub hero_id: AccountId,
+        /// The round number of the battle
         pub round_number: u32,
+        /// The damage dealt to the hero
         pub hero_damage_received: u32,
+        /// The damage dealt to the enemy
         pub enemy_damage_received: u32,
     }
 
+    /// A battle ended
     #[ink(event)]
     pub struct BattleEnded {
         /// The `AccountId` of the hero
         pub hero_id: AccountId,
         /// True if the hero won the battle
         pub hero_wins: bool,
+        /// The total number of rounds the battle took
+        pub round_count: u32,
+    }
+
+    /// A weapon was purchased
+    #[ink(event)]
+    pub struct WeaponPurchased {
+        /// The `AccountId` of the hero
+        pub hero_id: AccountId,
+        /// The `TokenId` of the weapon purchased
+        pub token_id: TokenId,
+        /// The strength of the weapon
+        pub strength: u32,
+    }
+
+    /// A hero rested
+    #[ink(event)]
+    pub struct Rested {
+        /// The `AccountId` of the hero
+        pub hero_id: AccountId,
+    }
+
+    /// Equipment was changed for a hero
+    #[ink(event)]
+    pub struct EquipmentChanged {
+        /// The `AccountId` of the hero
+        pub hero_id: AccountId,
+        /// The `TokenId` of the equipment
+        pub token_id: TokenId,
+        /// True if it was equipped, false if it was unequipped
+        pub equipped: bool,
     }
 
     /// Error types for the game
@@ -59,7 +103,9 @@ mod game {
         NoPermission,
         /// The equipment being equipped is invalid
         InvalidEquipment,
+        /// The attribute could not be decoded
         AttributeDecodeFailed,
+        /// A hero does not exist for the provided account id
         HeroNotFound,
         /// This operation is not allowed while in battle
         HeroIsInBattle,
@@ -67,7 +113,7 @@ mod game {
         HeroNotInBattle,
         /// The hero does not have any potions
         HeroHasNoPotions,
-        /// Not enough gold
+        /// The provided account id does not have enough gold
         NotEnoughGold,
     }
 
@@ -78,19 +124,33 @@ mod game {
     #[ink(storage)]
     #[derive(SpreadAllocate)]
     pub struct Game {
+        /// The configuration for the game
         config: Config,
+        /// The owner of the contract
         owner: AccountId,
+        /// The collection id that all tokens of the game use
         collection_id: CollectionId,
+        /// The id of the token used as gold
         gold_token_id: TokenId,
         /// The id of the collection used for all tokens
         next_token_id: TokenId,
+        /// The nonce used for randomness
         random_nonce: u32,
+        /// The seed used for randomness
         random_seed: u32,
+        /// A map of heroes by account id
         heroes: Mapping<AccountId, Hero>,
     }
 
     impl Game {
         /// Create a new game instance
+        /// ### Parameters
+        /// * `collection_id` - The collection id that all tokens will use
+        /// * `gold_token_id` - The id of the token used as gold
+        /// * `initial_token_id` - The first token id used for NFTs. This will be incremented for each token.
+        /// * `random_seed` - A value used to differentiate randomness between games
+        /// * `config` - The config used for the game. If not provided, it will use default values.
+        ///
         #[ink(constructor)]
         pub fn new(
             collection_id: CollectionId,
@@ -114,41 +174,6 @@ mod game {
             })
         }
 
-        /// Returns the game's config
-        #[ink(message)]
-        pub fn get_config(&self) -> Config {
-            self.config.clone()
-        }
-
-        /// Returns the `Hero` for `account_id`
-        #[ink(message)]
-        pub fn get_hero(&self, account_id: AccountId) -> Option<Hero> {
-            self.heroes.get(account_id)
-        }
-
-        #[ink(message)]
-        pub fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
-            if let Some(attribute) = self.env().extension().attribute_of(
-                self.collection_id,
-                Some(token_id),
-                attribute_key(),
-            ) {
-                Ok(Some(
-                    Decode::decode(&mut &attribute.value[..])
-                        .map_err(|_| Error::AttributeDecodeFailed)?,
-                ))
-            } else {
-                Ok(None)
-            }
-        }
-
-        #[ink(message)]
-        pub fn get_gold_balance(&self, account_id: AccountId) -> TokenBalance {
-            self.env()
-                .extension()
-                .balance_of(self.collection_id, self.gold_token_id, account_id)
-        }
-
         /// Modify the configuration of the game. Only callable by the owner.
         #[ink(message)]
         pub fn mutate_config(&mut self, mutation: ConfigMutation) -> Result<()> {
@@ -156,7 +181,10 @@ mod game {
             if self.env().caller() != self.owner {
                 return Err(Error::NoPermission);
             }
+
+            // apply the mutation
             mutation.apply_to(&mut self.config);
+
             Ok(())
         }
 
@@ -183,8 +211,9 @@ mod game {
             );
             self.heroes.insert(caller, &hero);
 
+            // emit the event
             self.env().emit_event(HeroCreated {
-                account_id: caller,
+                hero_id: caller,
                 weapon_id,
                 weapon_strength,
             });
@@ -196,9 +225,36 @@ mod game {
         pub fn start_battle(&mut self) -> Result<()> {
             let caller = self.env().caller();
             let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
-            let enemy = self.generate_enemy();
+
+            // possibly generate a hat for the enemy
+            let hat_id = {
+                if self.random_chance(self.config.enemy_wearing_hat_chance) {
+                    // the hat is owned by the contract
+                    let hat_id = self.mint_nft(self.env().account_id(), false);
+                    self.add_equipment_attribute(hat_id, TokenType::Hat, None);
+                    Some(hat_id)
+                } else {
+                    None
+                }
+            };
+
+            // create the enemy
+            let enemy = Enemy {
+                hat_id,
+                health: self.random_in_range(self.config.enemy_health_range),
+                strength: self.random_in_range(self.config.enemy_strength_range),
+            };
+
+            // update the data
             hero.battle = Some(Battle::new(enemy));
             self.heroes.insert(caller, &hero);
+
+            // emit the event
+            self.env().emit_event(BattleStarted {
+                hero_id: caller,
+                enemy,
+            });
+
             Ok(())
         }
 
@@ -210,12 +266,14 @@ mod game {
                 hero.is_dead() || battle.enemy.is_dead()
             }
 
+            // setup
             let caller = self.env().caller();
             let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
             let mut battle = hero.battle.ok_or(Error::HeroNotInBattle)?;
             let hero_initial_health = hero.health;
             let enemy_initial_health = battle.enemy.health;
 
+            // perform actions
             let hero_goes_first = self.random_chance(self.config.hero_goes_first_chance);
             if hero_goes_first {
                 self.hero_action(&mut hero, &mut battle, command)?;
@@ -229,7 +287,7 @@ mod game {
                 }
             }
 
-            // send the advanced event
+            // send the event
             self.env().emit_event(BattleAdvanced {
                 hero_id: caller,
                 round_number: battle.round_number,
@@ -238,15 +296,20 @@ mod game {
             });
             battle.round_number = battle.round_number.saturating_add(1);
 
+            // process battle outcome
             if battle_is_over(&hero, &battle) {
                 hero.battle = None;
 
+                // process hero victory
                 if battle.enemy.is_dead() {
+                    // update victory count
                     hero.consecutive_victory_count =
                         hero.consecutive_victory_count.saturating_add(1);
                     if hero.highest_consecutive_victory_count < hero.consecutive_victory_count {
                         hero.highest_consecutive_victory_count = hero.consecutive_victory_count;
                     }
+
+                    // give gold reward
                     let gold_amount = self.random_in_range(self.config.enemy_gold_drop_range);
                     self.mint_gold(gold_amount as TokenBalance);
 
@@ -263,7 +326,10 @@ mod game {
                         )
                     }
                 }
+
+                // process hero loss
                 if hero.is_dead() {
+                    // update hero stats
                     hero.health = self.config.hero_max_health;
                     hero.consecutive_victory_count = 0;
 
@@ -281,18 +347,23 @@ mod game {
                     }
                 }
 
+                // emit event
                 self.env().emit_event(BattleEnded {
                     hero_id: caller,
                     hero_wins: !hero.is_dead(),
+                    round_count: battle.round_number,
                 });
             } else {
                 hero.battle = Some(battle);
             }
+
+            // update the data
             self.heroes.insert(caller, &hero);
+
             Ok(())
         }
 
-        /// Change the equipment of the caller's hero
+        /// Equip `token_id` for the caller
         #[ink(message)]
         pub fn equip(&mut self, token_id: TokenId) -> Result<()> {
             let caller = self.env().caller();
@@ -333,6 +404,13 @@ mod game {
             // update the hero
             self.heroes.insert(caller, &hero);
 
+            // emit event
+            self.env().emit_event(EquipmentChanged {
+                hero_id: caller,
+                token_id,
+                equipped: true,
+            });
+
             Ok(())
         }
 
@@ -343,25 +421,40 @@ mod game {
             let mut hero = self
                 .get_hero(self.env().caller())
                 .ok_or(Error::HeroNotFound)?;
-            if hero.hat_id.is_some() {
+
+            // remove the hat
+            if let Some(hat_id) = hero.hat_id {
                 hero.hat_id = None;
                 self.heroes.insert(caller, &hero);
+
+                // emit event
+                self.env().emit_event(EquipmentChanged {
+                    hero_id: caller,
+                    token_id: hat_id,
+                    equipped: false,
+                });
             }
+
             Ok(())
         }
 
+        /// Recover the caller to full health. Can only be done outside of battle.
         #[ink(message)]
         pub fn rest(&mut self) -> Result<()> {
+            let caller = self.env().caller();
             let mut hero = self.spend_gold(self.config.rest_cost)?;
 
             // set health to max
             hero.health = self.config.hero_max_health;
             self.heroes.insert(self.env().caller(), &hero);
 
+            // emit event
+            self.env().emit_event(Rested { hero_id: caller });
+
             Ok(())
         }
 
-        /// Purchase a healing potion
+        /// Purchase a healing potion. Can only be done outside of battle.
         #[ink(message)]
         pub fn buy_potion(&mut self, quantity: u32) -> Result<()> {
             let mut hero =
@@ -374,23 +467,66 @@ mod game {
             Ok(())
         }
 
-        /// Buy a new weapon.
+        /// Buy a new weapon. Can only be done outside of battle.
         /// Returns the `TokenId` of the generated weapon.
         #[ink(message)]
         pub fn buy_weapon(&mut self) -> Result<TokenId> {
+            let caller = self.env().caller();
             self.spend_gold(self.config.weapon_cost)?;
 
             // generate the weapon
-            let token_id = self.mint_nft(self.env().caller(), false);
+            let token_id = self.mint_nft(caller, false);
             let strength = self.add_equipment_attribute(
                 token_id,
                 TokenType::Weapon,
                 Some(self.config.purchased_weapon_strength_range),
             );
-            self.env()
-                .emit_event(WeaponPurchased { token_id, strength });
+            self.env().emit_event(WeaponPurchased {
+                hero_id: caller,
+                token_id,
+                strength,
+            });
 
             Ok(token_id)
+        }
+
+        // read-only
+
+        /// Returns the game's config
+        #[ink(message)]
+        pub fn get_config(&self) -> Config {
+            self.config.clone()
+        }
+
+        /// Returns the `Hero` for `account_id` if it exists
+        #[ink(message)]
+        pub fn get_hero(&self, account_id: AccountId) -> Option<Hero> {
+            self.heroes.get(account_id)
+        }
+
+        /// Returns the `TokenMetadata` for `token_id` if it exists
+        #[ink(message)]
+        pub fn get_metadata(&self, token_id: TokenId) -> Result<Option<TokenMetadata>> {
+            if let Some(attribute) = self.env().extension().attribute_of(
+                self.collection_id,
+                Some(token_id),
+                attribute_key(),
+            ) {
+                Ok(Some(
+                    Decode::decode(&mut &attribute.value[..])
+                        .map_err(|_| Error::AttributeDecodeFailed)?,
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+
+        /// Returns the balance of gold for `account_id`
+        #[ink(message)]
+        pub fn get_gold_balance(&self, account_id: AccountId) -> TokenBalance {
+            self.env()
+                .extension()
+                .balance_of(self.collection_id, self.gold_token_id, account_id)
         }
     }
 
@@ -495,24 +631,6 @@ mod game {
             self.env().extension().burn(self.collection_id, params);
 
             Ok(hero)
-        }
-
-        fn generate_enemy(&mut self) -> Enemy {
-            let hat_id = {
-                if self.random_chance(self.config.enemy_wearing_hat_chance) {
-                    // the hat is owned by the contract
-                    let hat_id = self.mint_nft(self.env().account_id(), false);
-                    self.add_equipment_attribute(hat_id, TokenType::Hat, None);
-                    Some(hat_id)
-                } else {
-                    None
-                }
-            };
-            Enemy {
-                hat_id,
-                health: self.random_in_range(self.config.enemy_health_range),
-                strength: self.random_in_range(self.config.enemy_strength_range),
-            }
         }
 
         fn hero_action(
