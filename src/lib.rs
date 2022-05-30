@@ -9,37 +9,12 @@ use ink::codegen::Env;
 use ink_lang as ink;
 use ink_storage::{traits::SpreadAllocate, Mapping};
 use scale::{Decode, Encode};
-use types::*;
+use types::{Result, *};
 
 /// The attribute key used for equipment
 fn attribute_key() -> AttributeKey {
     b"equipment".to_vec()
 }
-
-/// Error types for the game
-#[derive(Debug, PartialEq, Eq, Encode, Decode)]
-#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
-pub enum Error {
-    /// The caller does not have permission for this operation
-    NoPermission,
-    /// The equipment being equipped is invalid
-    InvalidEquipment,
-    /// The attribute could not be decoded
-    AttributeDecodeFailed,
-    /// A hero does not exist for the provided account id
-    HeroNotFound,
-    /// This operation is not allowed while in battle
-    HeroIsInBattle,
-    /// This operation is only allowed while in battle
-    HeroNotInBattle,
-    /// The hero does not have any potions
-    HeroHasNoPotions,
-    /// The provided account id does not have enough gold
-    NotEnoughGold,
-}
-
-/// Result type for the game
-pub type Result<T> = core::result::Result<T, Error>;
 
 /// Multi-Tokens example smart contract
 #[ink::contract(env = EfinityEnvironment)]
