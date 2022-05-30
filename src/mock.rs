@@ -5,7 +5,7 @@ use efinity_contracts::{
 };
 use ink_env::test;
 use scale::{Decode, Encode};
-use std::{borrow::Borrow, cell::RefCell, collections::HashMap};
+use std::collections::HashMap;
 use tests::MOCK_EFINITY;
 
 const MINT: u32 = 1140261079;
@@ -51,8 +51,7 @@ impl MockChainExtension {
                     MintParams::CreateToken {
                         token_id,
                         initial_supply,
-                        unit_price,
-                        cap,
+                        ..
                     } => {
                         self.tokens.insert(
                             (collection_id, token_id),
@@ -69,9 +68,7 @@ impl MockChainExtension {
                         );
                     }
                     MintParams::Mint {
-                        token_id,
-                        amount,
-                        unit_price,
+                        token_id, amount, ..
                     } => {
                         self.tokens
                             .entry((collection_id, token_id))
@@ -103,8 +100,15 @@ impl MockChainExtension {
                 token.supply = token.supply.saturating_sub(params.amount);
             }
             TRANSFER => {
-                let (target, collection_id, params): (AccountId, CollectionId, TransferParams) =
-                    Decode::decode(&mut &input[1..]).unwrap();
+                // I have no idea why this one requires different index in different circumstances
+                let (target, collection_id, params): (AccountId, CollectionId, TransferParams) = {
+                    if let Ok(value) = Decode::decode(&mut &input[1..]) {
+                        value
+                    } else {
+                        Decode::decode(&mut &input[2..]).unwrap()
+                    }
+                };
+
                 let (token_id, source, amount) = match params {
                     TransferParams::Simple {
                         token_id, amount, ..

@@ -4,9 +4,7 @@
 mod mock;
 mod types;
 
-use efinity_contracts::{
-    prelude::*, AccountId, Freeze, MintRecipient, ReserveIdentifier, TransferRecipient,
-};
+use efinity_contracts::{prelude::*, Freeze};
 use ink::codegen::Env;
 use ink_lang as ink;
 use ink_prelude::vec::Vec;
@@ -23,7 +21,6 @@ fn attribute_key() -> AttributeKey {
 mod game {
     use super::*;
     use efinity_contracts::FreezeType;
-    use ink_env::test;
     use scale::{Decode, Encode};
 
     #[ink(event)]
@@ -180,7 +177,11 @@ mod game {
             );
 
             // create hero with the token we just minted
-            let hero = Hero::new(self.config.hero_max_health, weapon_id);
+            let hero = Hero::new(
+                self.config.hero_max_health,
+                weapon_id,
+                self.config.hero_initial_potion_count,
+            );
             self.heroes.insert(caller, &hero);
 
             self.env().emit_event(HeroCreated {
@@ -288,8 +289,8 @@ mod game {
                 .get_metadata(token_id)?
                 .ok_or(Error::InvalidEquipment)?;
 
-            // set eqiupment and prepare thaw
-            let mut thaw_token_id: Option<TokenId> = None;
+            // set equipment and prepare thaw
+            let thaw_token_id: Option<TokenId>;
             match metadata.token_type {
                 TokenType::Weapon => {
                     thaw_token_id = Some(hero.weapon_id);
@@ -339,7 +340,8 @@ mod game {
         /// Purchase a healing potion
         #[ink(message)]
         pub fn buy_potion(&mut self, quantity: u32) -> Result<()> {
-            let mut hero = self.spend_gold(self.config.rest_cost)?;
+            let mut hero =
+                self.spend_gold(self.config.potion_cost.saturating_mul(quantity as _))?;
 
             // add the potions
             hero.potion_count = hero.potion_count.saturating_add(quantity);
@@ -386,7 +388,7 @@ mod game {
             };
             self.env()
                 .extension()
-                .mint(recipient, self.collection_id, params.clone());
+                .mint(recipient, self.collection_id, params);
             if freeze {
                 self.env().extension().freeze(Freeze {
                     collection_id: self.collection_id,
@@ -408,6 +410,19 @@ mod game {
         }
 
         fn burn_gold(&mut self, amount: TokenBalance) {
+            // transfer gold to the contract
+            self.env().extension().transfer(
+                self.env().account_id(),
+                self.collection_id,
+                TransferParams::Operator {
+                    token_id: self.gold_token_id,
+                    source: self.env().caller(),
+                    amount: 1,
+                    keep_alive: false,
+                },
+            );
+
+            // burn the token units
             let params = BurnParams {
                 token_id: self.gold_token_id,
                 amount,
@@ -458,7 +473,7 @@ mod game {
             }
 
             // burn the gold being spent
-            self.burn_gold(self.config.rest_cost);
+            self.burn_gold(cost);
 
             Ok(hero)
         }
@@ -492,8 +507,8 @@ mod game {
                     let metadata = self
                         .get_metadata(hero.weapon_id)?
                         .ok_or(Error::InvalidEquipment)?;
-                    let strength = metadata.strength;
-                    battle.enemy.health = battle.enemy.health.saturating_sub(strength);
+                    let attack_power = self.calculate_attack_power(metadata.strength);
+                    battle.enemy.health = battle.enemy.health.saturating_sub(attack_power);
                 }
                 Command::Heal => {
                     if hero.potion_count == 0 {
@@ -508,7 +523,8 @@ mod game {
 
         fn enemy_action(&mut self, hero: &mut Hero, battle: &mut Battle) -> Result<()> {
             let enemy = &mut battle.enemy;
-            hero.health = hero.health.saturating_sub(enemy.strength);
+            let attack_power = self.calculate_attack_power(enemy.strength);
+            hero.health = hero.health.saturating_sub(attack_power);
             Ok(())
         }
 
@@ -537,6 +553,14 @@ mod game {
         fn random_chance(&mut self, chance: u32) -> bool {
             self.random_in_range((0, 100).into()) <= chance
         }
+
+        fn calculate_attack_power(&mut self, strength: u32) -> u32 {
+            // this is a workaround because random_in_range supports unsigned only
+            let unsigned_variance =
+                self.random_in_range((0, self.config.attack_variance * 2 + 1).into());
+            let delta = unsigned_variance as i32 - self.config.attack_variance as i32;
+            (strength as i32 + delta) as u32
+        }
     }
 
     /// Linearly interpolates between `a` and `b` by `t`, where `t` is considered
@@ -554,12 +578,10 @@ mod game {
     #[cfg(test)]
     pub mod tests {
         use super::*;
-        use crate::mock::Token;
         use efinity_contracts::AccountId;
-        use ink_env::{caller, test};
+        use ink_env::test;
         use mock::MockChainExtension;
-        use scale::Encode;
-        use std::{cell::RefCell, collections::HashMap};
+        use std::cell::RefCell;
 
         thread_local! {
             pub static MOCK_EFINITY: RefCell<MockChainExtension> = RefCell::new(Default::default());
@@ -588,13 +610,18 @@ mod game {
         #[ink::test]
         fn test_create_hero() {
             // init game
-            let config = Config::default();
-            let mut game = init_game(config);
+            let config = Config {
+                hero_initial_potion_count: 5,
+                ..Default::default()
+            };
+            let mut game = init_game(config.clone());
             let collection_id = game.collection_id;
 
             // create a hero for bob
             test::set_caller::<EfinityEnvironment>(bob());
             let hero = game.create_hero();
+            assert_eq!(hero.health, config.hero_max_health);
+            assert_eq!(hero.potion_count, config.hero_initial_potion_count);
 
             // verify the hero's tokens for weapon and armor were minted
             assert_eq!(hero, game.heroes.get(bob()).unwrap());
@@ -685,10 +712,12 @@ mod game {
         fn test_advance_battle() {
             // give hero and enemy a lot of health so they don't die
             let config = Config {
+                hero_initial_potion_count: 0,
                 hero_max_health: 100,
                 enemy_health_range: (100, 100).into(),
                 ..Default::default()
             };
+            let attack_variance = config.attack_variance;
             let mut game = init_game(config);
             game.create_hero();
             game.start_battle().unwrap();
@@ -699,14 +728,23 @@ mod game {
             let hero = game.get_hero(alice()).unwrap();
             let hero_strength = game.get_metadata(hero.weapon_id).unwrap().unwrap().strength;
             let battle = hero.battle.unwrap();
-            assert_eq!(
-                hero.health,
-                game.config.hero_max_health - initial_enemy.strength
+
+            // check hero health
+            let expected_hero_health = Range::new(
+                game.config.hero_max_health - initial_enemy.strength - attack_variance,
+                game.config.hero_max_health - initial_enemy.strength + attack_variance,
             );
-            assert_eq!(battle.enemy.health, initial_enemy.health - hero_strength);
+            assert!(expected_hero_health.contains(hero.health));
+
+            // check enemy health
+            let expected_enemy_health = Range::new(
+                initial_enemy.health - hero_strength - attack_variance,
+                initial_enemy.health - hero_strength + attack_variance,
+            );
+            assert!(expected_enemy_health.contains(battle.enemy.health));
             assert_eq!(battle.round_number, 1);
 
-            // try to heal without potion fails
+            // trying to heal without potion fails
             assert_eq!(
                 game.advance_battle(Command::Heal).unwrap_err(),
                 Error::HeroHasNoPotions
@@ -746,7 +784,7 @@ mod game {
             hero.health = game.config.hero_max_health - 1;
 
             // verify the enemy's hat is owned by the contract
-            let mut battle = hero.battle.unwrap();
+            let battle = hero.battle.unwrap();
             let hat_id = battle.enemy.hat_id.unwrap();
             // the contract should own the hat
             assert_eq!(
@@ -789,7 +827,7 @@ mod game {
 
             // lose the battle
             game.advance_battle(Command::Attack).unwrap();
-            let mut hero = game.get_hero(alice()).unwrap();
+            let hero = game.get_hero(alice()).unwrap();
             assert!(hero.battle.is_none());
 
             // health and victory count should be reset
@@ -868,34 +906,85 @@ mod game {
             );
         }
 
-        #[test]
+        #[ink::test]
         fn test_buy_potion() {
-            #[ink::test]
-            fn test_rest() {
-                let config = Config {
-                    potion_cost: 10,
-                    ..Default::default()
-                };
-                let mut game = init_game(config.clone());
+            let config = Config {
+                potion_cost: 10,
+                hero_initial_potion_count: 0,
+                ..Default::default()
+            };
+            let mut game = init_game(config);
 
-                // cannot buy without hero
-                assert_eq!(game.buy_potion(1), Err(Error::HeroNotFound));
+            // cannot buy without hero
+            assert_eq!(game.buy_potion(1), Err(Error::HeroNotFound));
 
-                // cant buy if you don't have enough gold
-                let mut hero = game.create_hero();
-                game.mint_gold(15);
-                assert_eq!(game.buy_potion(2), Err(Error::NotEnoughGold));
+            // cant buy if you don't have enough gold
+            game.create_hero();
+            game.mint_gold(15);
+            assert_eq!(game.buy_potion(2), Err(Error::NotEnoughGold));
 
-                // mint gold and then buy the potion
-                game.mint_gold(5);
-                game.buy_potion(2).unwrap();
-                assert_eq!(game.get_gold_balance(alice()), 0);
-                assert_eq!(game.get_hero(alice()).unwrap().potion_count, 2);
-            }
+            // mint gold and then buy the potion
+            game.mint_gold(5);
+            assert_eq!(game.get_gold_balance(alice()), 20);
+            game.buy_potion(2).unwrap();
+            assert_eq!(game.get_gold_balance(alice()), 0);
+            assert_eq!(game.get_hero(alice()).unwrap().potion_count, 2);
         }
 
         #[ink::test]
-        fn test_buy_weapon() {}
+        fn test_buy_weapon() {
+            let config = Config {
+                weapon_cost: 10,
+                purchased_weapon_strength_range: (50, 100).into(),
+                ..Default::default()
+            };
+            let mut game = init_game(config.clone());
+
+            // cannot buy without hero
+            assert_eq!(game.buy_weapon(), Err(Error::HeroNotFound));
+
+            // cant buy if you don't have enough gold
+            game.create_hero();
+            assert_eq!(game.buy_weapon(), Err(Error::NotEnoughGold));
+
+            // can now buy the weapon
+            game.mint_gold(10);
+            let weapon_id = game.buy_weapon().unwrap();
+            let metadata = game.get_metadata(weapon_id).unwrap().unwrap();
+
+            // its strength should match the config
+            assert!(config
+                .purchased_weapon_strength_range
+                .contains(metadata.strength));
+        }
+
+        #[ink::test]
+        fn test_calculate_attack_power() {
+            fn new_game_with_attack_variance(attack_variance: u32) -> Game {
+                init_game(Config {
+                    attack_variance,
+                    ..Default::default()
+                })
+            }
+
+            // verify several cases of variance 2
+            let mut game = new_game_with_attack_variance(2);
+            for _ in 0..10 {
+                assert!(Range::new(8, 12).contains(game.calculate_attack_power(10)));
+            }
+
+            // verify several cases of variance 5
+            let mut game = new_game_with_attack_variance(5);
+            for _ in 0..10 {
+                assert!(Range::new(5, 15).contains(game.calculate_attack_power(10)));
+            }
+
+            // verify several cases of variance 0
+            let mut game = new_game_with_attack_variance(0);
+            for _ in 0..10 {
+                assert_eq!(game.calculate_attack_power(10), 10);
+            }
+        }
 
         #[test]
         fn test_lerp() {
