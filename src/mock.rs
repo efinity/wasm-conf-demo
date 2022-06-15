@@ -6,7 +6,7 @@ use efinity_contracts::{
     TokenBalance, TokenId, TransferParams,
 };
 use ink_env::test;
-use scale::{Decode, Encode};
+use scale::{Decode, Encode, WrapperTypeDecode};
 use std::collections::HashMap;
 use tests::MOCK_EFINITY;
 
@@ -35,6 +35,21 @@ pub fn register_chain_extension() {
     test::register_chain_extension(MockExtensionFunction::<THAW>);
 }
 
+/// This is a workaround because I don't know what the first few bytes in the input array are
+fn decode<T: Decode>(input: &[u8]) -> T {
+    for i in (1..=2).rev() {
+        if let Ok(value) = Decode::decode(&mut &input[i..]) {
+            match i {
+                1 => println!("{}", input[0]),
+                2 => println!("{}, {}", input[0], input[1]),
+                _ => panic!("print not set up"),
+            }
+            return value;
+        }
+    }
+    panic!()
+}
+
 #[derive(Default)]
 pub struct MockChainExtension {
     /// This is a temporary workaround because there doesn't seem to be any way to read the contract
@@ -51,7 +66,7 @@ impl MockChainExtension {
             MINT => {
                 // not sure why I have to start at index 1 instead of 0?
                 let (recipient, collection_id, params): (AccountId, CollectionId, MintParams) =
-                    Decode::decode(&mut &input[1..]).unwrap();
+                    decode(&mut &input);
                 match params {
                     MintParams::CreateToken {
                         token_id,
@@ -90,8 +105,7 @@ impl MockChainExtension {
                 };
             }
             BURN => {
-                let (collection_id, params): (CollectionId, BurnParams) =
-                    Decode::decode(&mut &input[1..]).unwrap();
+                let (collection_id, params): (CollectionId, BurnParams) = decode(&input);
                 let token_account = self
                     .token_accounts
                     .get_mut(&(self.contract_address, collection_id, params.token_id))
@@ -106,13 +120,8 @@ impl MockChainExtension {
             }
             TRANSFER => {
                 // I have no idea why this one requires different index in different circumstances
-                let (target, collection_id, params): (AccountId, CollectionId, TransferParams) = {
-                    if let Ok(value) = Decode::decode(&mut &input[1..]) {
-                        value
-                    } else {
-                        Decode::decode(&mut &input[2..]).unwrap()
-                    }
-                };
+                let (target, collection_id, params): (AccountId, CollectionId, TransferParams) =
+                    decode(&input);
 
                 let (token_id, source, amount) = match params {
                     TransferParams::Simple {
@@ -138,7 +147,7 @@ impl MockChainExtension {
                     .or_insert(TokenAccount { balance: amount });
             }
             FREEZE => {
-                let freeze: Freeze = Decode::decode(&mut &input[1..]).unwrap();
+                let freeze: Freeze = decode(&input);
                 match freeze.freeze_type {
                     FreezeType::Token(token_id) => {
                         let token = self
@@ -151,7 +160,7 @@ impl MockChainExtension {
                 }
             }
             THAW => {
-                let freeze: Freeze = Decode::decode(&mut &input[1..]).unwrap();
+                let freeze: Freeze = decode(&input);
                 match freeze.freeze_type {
                     FreezeType::Token(token_id) => {
                         let token = self
@@ -169,7 +178,7 @@ impl MockChainExtension {
                     Option<TokenId>,
                     AttributeKey,
                     AttributeValue,
-                ) = Decode::decode(&mut &input[1..]).unwrap();
+                ) = decode(&input);
                 self.attributes.insert(
                     (collection_id, token_id, key),
                     Attribute { value, deposit: 0 },
@@ -181,14 +190,14 @@ impl MockChainExtension {
             }
             ATTRIBUTE_OF => {
                 let (collection_id, token_id, key): (CollectionId, Option<TokenId>, AttributeKey) =
-                    Decode::decode(&mut &input[1..]).unwrap();
+                    decode(&input);
                 let attribute = self.attribute_of(collection_id, token_id, key);
                 Encode::encode_to(&attribute, output);
             }
             BALANCE_OF => {
                 // I don't know why this one must start at 2
                 let (collection_id, token_id, account_id): (CollectionId, TokenId, AccountId) =
-                    Decode::decode(&mut &input[2..]).unwrap();
+                    decode(&input);
                 let balance = self.balance_of(collection_id, token_id, account_id);
                 Encode::encode_to(&balance, output);
             }

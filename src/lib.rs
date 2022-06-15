@@ -26,7 +26,7 @@ mod game {
     pub struct HeroCreated {
         /// The `AccountId` of the hero
         pub hero_id: AccountId,
-        /// The `TokenId` of the weapon
+        /// The token id of the weapon
         pub weapon_id: TokenId,
         /// The strength of the weapon
         pub weapon_strength: u32,
@@ -188,14 +188,11 @@ mod game {
             let caller = self.env().caller();
 
             // mint the weapon token
-            let weapon_id = self.mint_nft(caller, true);
+            let weapon_id = self.mint_nft(caller, TokenType::Weapon, true);
 
             // add attribute to equipment tokens
-            let weapon_strength = self.add_equipment_attribute(
-                weapon_id,
-                TokenType::Weapon,
-                Some(self.config.starting_weapon_strength_range),
-            );
+            let weapon_strength =
+                self.add_equipment_attribute(weapon_id, self.config.starting_weapon_strength_range);
 
             // create hero with the token we just minted
             let hero = Hero::new(
@@ -224,9 +221,7 @@ mod game {
             let hat_id = {
                 if self.random_chance(self.config.enemy_wearing_hat_chance) {
                     // the hat is owned by the contract
-                    let hat_id = self.mint_nft(self.env().account_id(), false);
-                    self.add_equipment_attribute(hat_id, TokenType::Hat, None);
-                    Some(hat_id)
+                    Some(self.mint_nft(self.env().account_id(), TokenType::Hat, false))
                 } else {
                     None
                 }
@@ -369,14 +364,19 @@ mod game {
             let caller = self.env().caller();
             let mut hero = self.heroes.get(caller).ok_or(Error::HeroNotFound)?;
 
-            // get the token metadata
-            let metadata = self
-                .get_metadata(token_id)?
+            // get the token type
+            let token_type = WrappedTokenId(token_id)
+                .token_type()
                 .ok_or(Error::InvalidEquipment)?;
+
+            // Make sure if it's a weapon, it has metadata
+            if matches!(token_type, TokenType::Weapon) && self.get_metadata(token_id)?.is_none() {
+                return Err(Error::InvalidEquipment);
+            }
 
             // set equipment and prepare thaw
             let thaw_token_id: Option<TokenId>;
-            match metadata.token_type {
+            match token_type {
                 TokenType::Weapon => {
                     thaw_token_id = Some(hero.weapon_id);
                     hero.weapon_id = token_id;
@@ -482,12 +482,9 @@ mod game {
             self.spend_gold(self.config.weapon_cost)?;
 
             // generate the weapon
-            let token_id = self.mint_nft(caller, false);
-            let strength = self.add_equipment_attribute(
-                token_id,
-                TokenType::Weapon,
-                Some(self.config.purchased_weapon_strength_range),
-            );
+            let token_id = self.mint_nft(caller, TokenType::Weapon, false);
+            let strength =
+                self.add_equipment_attribute(token_id, self.config.purchased_weapon_strength_range);
             self.env().emit_event(WeaponPurchased {
                 hero_id: caller,
                 token_id,
@@ -532,8 +529,15 @@ mod game {
         }
 
         /// Mints a non-fungible token to `recipient`. Freezes it if `freeze` is true.
-        fn mint_nft(&mut self, recipient: AccountId, freeze: bool) -> TokenId {
-            let token_id = self.increment_next_token_id();
+        fn mint_nft(
+            &mut self,
+            recipient: AccountId,
+            token_type: TokenType,
+            freeze: bool,
+        ) -> TokenId {
+            let id = self.increment_next_token_id();
+            let token_id = WrappedTokenId::new(id, Some(token_type)).0;
+
             let params = MintParams::CreateToken {
                 token_id,
                 initial_supply: 1,
@@ -566,19 +570,9 @@ mod game {
 
         /// Adds `TokenMetadata` to `token_id` and sets `token_type`. Generates strength value if `strength_range` is
         /// Some. Returns the generated strength.
-        fn add_equipment_attribute(
-            &mut self,
-            token_id: TokenId,
-            token_type: TokenType,
-            strength_range: Option<Range>,
-        ) -> u32 {
-            let strength = strength_range
-                .map(|x| self.random_in_range(x))
-                .unwrap_or_default();
-            let metadata = TokenMetadata {
-                token_type,
-                strength,
-            };
+        fn add_equipment_attribute(&mut self, token_id: TokenId, strength_range: Range) -> u32 {
+            let strength = self.random_in_range(strength_range);
+            let metadata = TokenMetadata { strength };
             self.env().extension().set_attribute(
                 self.collection_id,
                 Some(token_id),
@@ -854,9 +848,8 @@ mod game {
             let enemy = hero.battle.unwrap().enemy;
 
             // enemy should be wearing a hat
-            let hat_id = enemy.hat_id.unwrap();
-            let metadata = game.get_metadata(hat_id).unwrap().unwrap();
-            assert_eq!(metadata.token_type, TokenType::Hat);
+            let hat_id = WrappedTokenId(enemy.hat_id.unwrap());
+            assert_eq!(hat_id.token_type(), Some(TokenType::Hat));
 
             // the enemy stats should be in the correct ranges
             assert!(config.enemy_health_range.contains(enemy.health));
@@ -1049,14 +1042,14 @@ mod game {
             assert_eq!(game.equip(10).unwrap_err(), Error::InvalidEquipment);
 
             // Mint a new token. It will still fail because there is no weapon attribute
-            let new_weapon_id = game.mint_nft(alice(), false);
+            let new_weapon_id = game.mint_nft(alice(), TokenType::Weapon, false);
             assert_eq!(
                 game.equip(new_weapon_id).unwrap_err(),
                 Error::InvalidEquipment
             );
 
             // add equipment attribute and now it works
-            game.add_equipment_attribute(new_weapon_id, TokenType::Weapon, Some((1, 1).into()));
+            game.add_equipment_attribute(new_weapon_id, (1, 1).into());
             game.equip(new_weapon_id).unwrap();
 
             // make sure new weapon is frozen. Old one is not frozen.
@@ -1087,8 +1080,7 @@ mod game {
             game.create_hero();
 
             // equip a hat
-            let hat_id = game.mint_nft(alice(), false);
-            game.add_equipment_attribute(hat_id, TokenType::Hat, None);
+            let hat_id = game.mint_nft(alice(), TokenType::Hat, false);
             game.equip(hat_id).unwrap();
 
             // hero should be wearing the hat
@@ -1250,6 +1242,29 @@ mod game {
             // does not contain
             assert!(!range.contains(4));
             assert!(!range.contains(11));
+        }
+
+        /// Test `WrappedTokenId` type
+        #[test]
+        fn test_wrapped_token_id() {
+            use TokenType::*;
+
+            let token_id = 921324;
+
+            let mut wrapped = WrappedTokenId(token_id);
+            assert!(wrapped.token_type().is_none());
+
+            wrapped.set_token_type(Some(Weapon));
+            assert_eq!(wrapped.token_type(), Some(Weapon));
+            assert_eq!(wrapped.id(), token_id);
+
+            wrapped.set_token_type(Some(Hat));
+            assert_eq!(wrapped.token_type(), Some(Hat));
+            assert_eq!(wrapped.id(), token_id);
+
+            wrapped.set_token_type(None);
+            assert!(wrapped.token_type().is_none());
+            assert_eq!(wrapped.id(), token_id);
         }
     }
 }

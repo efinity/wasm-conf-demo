@@ -263,20 +263,74 @@ impl Battle {
 /// A type that a token can be
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
+#[allow(clippy::unnecessary_cast)]
 #[repr(u8)]
 pub enum TokenType {
     /// The token is a weapon
-    Weapon,
+    Weapon = 1,
     /// The token is a hat
-    Hat,
+    Hat = 2,
+}
+
+impl TokenType {
+    /// Create from a u8
+    pub fn from_value(value: u8) -> Option<Self> {
+        const WEAPON_VALUE: u8 = TokenType::Weapon as _;
+        const HAT_VALUE: u8 = TokenType::Hat as _;
+
+        match value {
+            WEAPON_VALUE => Some(Self::Weapon),
+            HAT_VALUE => Some(Self::Hat),
+            _ => None,
+        }
+    }
+}
+
+/// Wraps the `TokenId` so we can encode the `TokenType` in it
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct WrappedTokenId(pub TokenId);
+
+impl WrappedTokenId {
+    /// The bit index to store the token type
+    const TOKEN_TYPE_INDEX: u128 = 124;
+    /// The bit-mask of the token type
+    const TOKEN_TYPE_BIT_MASK: u128 = 0b1111 << Self::TOKEN_TYPE_INDEX;
+
+    /// Create a new instance
+    pub fn new(id: TokenId, token_type: Option<TokenType>) -> Self {
+        let mut value = Self(id);
+        value.set_token_type(token_type);
+        value
+    }
+
+    /// Set the token type
+    pub fn set_token_type(&mut self, token_type: Option<TokenType>) {
+        let token_type_value: u128 = token_type.map(|x| x as u8).unwrap_or_default().into();
+
+        // clear bits
+        self.0 &= !Self::TOKEN_TYPE_BIT_MASK;
+
+        // set mask
+        self.0 |= (token_type_value << Self::TOKEN_TYPE_INDEX) as u128;
+    }
+
+    /// Get the token type
+    pub fn token_type(&self) -> Option<TokenType> {
+        let value = (self.0 & Self::TOKEN_TYPE_BIT_MASK) >> Self::TOKEN_TYPE_INDEX;
+        TokenType::from_value(value as u8)
+    }
+
+    /// The id without any encoding
+    #[cfg(test)]
+    pub fn id(&self) -> TokenId {
+        self.0 & !Self::TOKEN_TYPE_BIT_MASK
+    }
 }
 
 /// Metadata stored for the token as an attribute
 #[derive(Encode, Decode)]
 #[cfg_attr(feature = "std", derive(TypeInfo))]
 pub struct TokenMetadata {
-    /// The type of the token
-    pub token_type: TokenType,
-    /// The strength of the token, or 0 if it has no strength
+    /// The strength value
     pub strength: u32,
 }
