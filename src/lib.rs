@@ -1,3 +1,5 @@
+//! A simple smart contract game for Efinity
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(test)]
@@ -180,6 +182,16 @@ mod game {
         #[ink(message)]
         pub fn get_config(&self) -> Config {
             self.config.clone()
+        }
+
+        /// Returns the token type and id of a token id
+        #[ink(message)]
+        pub fn get_token_info(&self, token_id: TokenId) -> TokenIdInfo {
+            let token_id = WrappedTokenId(token_id);
+            TokenIdInfo {
+                token_type: token_id.token_type(),
+                id: token_id.id(),
+            }
         }
 
         /// Create a hero for the caller

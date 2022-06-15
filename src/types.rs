@@ -321,7 +321,6 @@ impl WrappedTokenId {
     }
 
     /// The id without any encoding
-    #[cfg(test)]
     pub fn id(&self) -> TokenId {
         self.0 & !Self::TOKEN_TYPE_BIT_MASK
     }
@@ -333,4 +332,14 @@ impl WrappedTokenId {
 pub struct TokenMetadata {
     /// The strength value
     pub strength: u32,
+}
+
+/// Returned from `get_token_info` message. Contains info about a token id.
+#[derive(Encode, Decode)]
+#[cfg_attr(feature = "std", derive(TypeInfo))]
+pub struct TokenIdInfo {
+    /// The type of the token
+    pub token_type: Option<TokenType>,
+    /// The id of the token
+    pub id: TokenId,
 }

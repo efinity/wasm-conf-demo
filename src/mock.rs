@@ -6,7 +6,7 @@ use efinity_contracts::{
     TokenBalance, TokenId, TransferParams,
 };
 use ink_env::test;
-use scale::{Decode, Encode, WrapperTypeDecode};
+use scale::{Decode, Encode};
 use std::collections::HashMap;
 use tests::MOCK_EFINITY;
 
