@@ -35,19 +35,10 @@ pub fn register_chain_extension() {
     test::register_chain_extension(MockExtensionFunction::<THAW>);
 }
 
-/// This is a workaround because I don't know what the first few bytes in the input array are
+/// Decode to a vector, then to the value
 fn decode<T: Decode>(input: &[u8]) -> T {
-    for i in (1..=2).rev() {
-        if let Ok(value) = Decode::decode(&mut &input[i..]) {
-            match i {
-                1 => println!("{}", input[0]),
-                2 => println!("{}, {}", input[0], input[1]),
-                _ => panic!("print not set up"),
-            }
-            return value;
-        }
-    }
-    panic!()
+    let bytes: Vec<u8> = Decode::decode(&mut &input[..]).unwrap();
+    Decode::decode(&mut &bytes[..]).unwrap()
 }
 
 #[derive(Default)]
