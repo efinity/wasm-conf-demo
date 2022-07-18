@@ -19,6 +19,9 @@ ink_prelude = { version = "3.2.0", default-features = false }
 ink_primitives = { version = "3.2.0", default-features = false }
 ink_storage = { version = "3.2.0", default-features = false }
 
+#[dev-dependencies]
+#efinity-contracts = { path = "../efinity-dev/contracts/efinity-contracts", features = ["test-utils"] }
+
 [lib]
 name = "fighting_game"
 path = "src/lib.rs"
@@ -35,4 +38,8 @@ std = [
   "ink_primitives/std",
   "scale/std",
   "scale-info/std",
+  "efinity-contracts/std",
 ]
+
+# this shouldn't be needed, but using as a dev-dependency is not working
+test-utils = ["efinity-contracts/test-utils"]

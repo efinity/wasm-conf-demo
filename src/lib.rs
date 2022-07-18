@@ -1,6 +1,8 @@
 //! A simple smart contract game for Efinity
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// additional safety
+#![deny(unused_must_use)]
 
 #[cfg(test)]
 mod mock;
@@ -11,7 +13,7 @@ use ink::codegen::Env;
 use ink_lang as ink;
 use ink_storage::{traits::SpreadAllocate, Mapping};
 use scale::{Decode, Encode};
-use types::{Result, *};
+use types::{Error, Result, *};
 
 /// The attribute key used for equipment
 fn attribute_key() -> AttributeKey {
@@ -20,6 +22,7 @@ fn attribute_key() -> AttributeKey {
 
 /// Multi-Tokens example smart contract
 #[ink::contract(env = EfinityEnvironment)]
+#[allow(clippy::extra_unused_lifetimes, clippy::let_unit_value)]
 mod game {
     use super::*;
 
@@ -196,15 +199,15 @@ mod game {
 
         /// Create a hero for the caller
         #[ink(message)]
-        pub fn create_hero(&mut self) -> Hero {
+        pub fn create_hero(&mut self) -> Result<Hero> {
             let caller = self.env().caller();
 
             // mint the weapon token
-            let weapon_id = self.mint_nft(caller, TokenType::Weapon, true);
+            let weapon_id = self.mint_nft(caller, TokenType::Weapon, true)?;
 
             // add attribute to equipment tokens
-            let weapon_strength =
-                self.add_equipment_attribute(weapon_id, self.config.starting_weapon_strength_range);
+            let weapon_strength = self
+                .add_equipment_attribute(weapon_id, self.config.starting_weapon_strength_range)?;
 
             // create hero with the token we just minted
             let hero = Hero::new(
@@ -220,7 +223,7 @@ mod game {
                 weapon_id,
                 weapon_strength,
             });
-            hero
+            Ok(hero)
         }
 
         /// Start a battle with a randomly generated enemy
@@ -233,7 +236,7 @@ mod game {
             let hat_id = {
                 if self.random_chance(self.config.enemy_wearing_hat_chance) {
                     // the hat is owned by the contract
-                    Some(self.mint_nft(self.env().account_id(), TokenType::Hat, false))
+                    Some(self.mint_nft(self.env().account_id(), TokenType::Hat, false)?)
                 } else {
                     None
                 }
@@ -312,7 +315,7 @@ mod game {
 
                     // give gold reward
                     let gold_amount = self.random_in_range(self.config.enemy_gold_drop_range);
-                    self.mint_gold(gold_amount as TokenBalance);
+                    self.mint_gold(gold_amount as TokenBalance)?;
 
                     // transfer the hat to the hero if it exists
                     if let Some(hat_id) = battle.enemy.hat_id {
@@ -324,7 +327,7 @@ mod game {
                                 amount: 1,
                                 keep_alive: false,
                             },
-                        )
+                        )?;
                     }
                 }
 
@@ -344,7 +347,7 @@ mod game {
                                 keep_alive: false,
                                 remove_token_storage: true,
                             },
-                        );
+                        )?;
                     }
                 }
 
@@ -404,14 +407,14 @@ mod game {
                 self.env().extension().thaw(Freeze {
                     collection_id: self.collection_id,
                     freeze_type: FreezeType::Token(thaw_token_id),
-                });
+                })?;
             }
 
             // freeze new equipped token
             self.env().extension().freeze(Freeze {
                 collection_id: self.collection_id,
                 freeze_type: FreezeType::Token(token_id),
-            });
+            })?;
 
             // update the hero
             self.heroes.insert(caller, &hero);
@@ -443,7 +446,7 @@ mod game {
                 self.env().extension().thaw(Freeze {
                     collection_id: self.collection_id,
                     freeze_type: FreezeType::Token(hat_id),
-                });
+                })?;
 
                 // emit event
                 self.env().emit_event(EquipmentChanged {
@@ -494,9 +497,9 @@ mod game {
             self.spend_gold(self.config.weapon_cost)?;
 
             // generate the weapon
-            let token_id = self.mint_nft(caller, TokenType::Weapon, false);
-            let strength =
-                self.add_equipment_attribute(token_id, self.config.purchased_weapon_strength_range);
+            let token_id = self.mint_nft(caller, TokenType::Weapon, false)?;
+            let strength = self
+                .add_equipment_attribute(token_id, self.config.purchased_weapon_strength_range)?;
             self.env().emit_event(WeaponPurchased {
                 hero_id: caller,
                 token_id,
@@ -546,7 +549,7 @@ mod game {
             recipient: AccountId,
             token_type: TokenType,
             freeze: bool,
-        ) -> TokenId {
+        ) -> Result<TokenId> {
             let id = self.increment_next_token_id();
             let token_id = WrappedTokenId::new(id, Some(token_type)).0;
 
@@ -555,21 +558,22 @@ mod game {
                 initial_supply: 1,
                 unit_price: self.env().extension().get_token_account_deposit(),
                 cap: Some(TokenCap::SingleMint),
+                royalty: None,
             };
             self.env()
                 .extension()
-                .mint(recipient, self.collection_id, params);
+                .mint(recipient, self.collection_id, params)?;
             if freeze {
                 self.env().extension().freeze(Freeze {
                     collection_id: self.collection_id,
                     freeze_type: FreezeType::Token(token_id),
-                })
+                })?;
             }
-            token_id
+            Ok(token_id)
         }
 
         /// Mints `amount` gold to the caller
-        fn mint_gold(&mut self, amount: TokenBalance) {
+        fn mint_gold(&mut self, amount: TokenBalance) -> Result<()> {
             let params = MintParams::Mint {
                 token_id: self.gold_token_id,
                 amount,
@@ -577,12 +581,17 @@ mod game {
             };
             self.env()
                 .extension()
-                .mint(self.env().caller(), self.collection_id, params);
+                .mint(self.env().caller(), self.collection_id, params)?;
+            Ok(())
         }
 
         /// Adds `TokenMetadata` to `token_id` and sets `token_type`. Generates strength value if `strength_range` is
         /// Some. Returns the generated strength.
-        fn add_equipment_attribute(&mut self, token_id: TokenId, strength_range: Range) -> u32 {
+        fn add_equipment_attribute(
+            &mut self,
+            token_id: TokenId,
+            strength_range: Range,
+        ) -> Result<u32> {
             let strength = self.random_in_range(strength_range);
             let metadata = TokenMetadata { strength };
             self.env().extension().set_attribute(
@@ -590,8 +599,8 @@ mod game {
                 Some(token_id),
                 attribute_key(),
                 metadata.encode(),
-            );
-            strength
+            )?;
+            Ok(strength)
         }
 
         /// Spends `amount` gold from the caller's account. Returns the hero.
@@ -623,7 +632,7 @@ mod game {
                     amount,
                     keep_alive: true,
                 },
-            );
+            )?;
 
             // burn the token units
             let params = BurnParams {
@@ -632,7 +641,7 @@ mod game {
                 keep_alive: false,
                 remove_token_storage: false,
             };
-            self.env().extension().burn(self.collection_id, params);
+            self.env().extension().burn(self.collection_id, params)?;
 
             Ok(hero)
         }
@@ -723,23 +732,39 @@ mod game {
     #[cfg(test)]
     pub mod tests {
         use super::*;
-        use efinity_contracts::AccountId;
+        use efinity_contracts::{mock, AccountId};
         use ink_env::test;
-        use mock::MockChainExtension;
         use std::cell::RefCell;
-
-        thread_local! {
-            /// Mock of efinity chain extension
-            pub static MOCK_EFINITY: RefCell<MockChainExtension> = RefCell::new(Default::default());
-        }
 
         /// Set up the game for tests
         fn init_game(config: Config) -> Game {
-            mock::register_chain_extension();
-            let game = Game::new(1000, 0, 1, 0, Some(config));
-            MOCK_EFINITY.with(|efinity| {
-                efinity.borrow_mut().contract_address = game.env().account_id();
-            });
+            // instantiate the smart contract
+            let mut game = Game::new(1000, 0, 1, 0, Some(config));
+
+            // for tests to work, the mock chain extension needs to be registered
+            mock::register_chain_extension(game.env().account_id());
+
+            // create the collection used by the game
+            game.collection_id = game
+                .env()
+                .extension()
+                .create_collection(Default::default())
+                .unwrap();
+
+            // create the token used as gold
+            let params = MintParams::CreateToken {
+                token_id: game.gold_token_id,
+                initial_supply: 1,
+                unit_price: game.env().extension().get_token_account_deposit(),
+                cap: Some(TokenCap::SingleMint),
+                royalty: None,
+            };
+            game.env()
+                .extension()
+                // mint to frank because we don't use that account in other tests
+                .mint(accounts().frank, game.collection_id, params)
+                .unwrap();
+
             game
         }
 
@@ -771,28 +796,35 @@ mod game {
 
             // create a hero for bob
             test::set_caller::<EfinityEnvironment>(bob());
-            let hero = game.create_hero();
+            let hero = game.create_hero().unwrap();
             assert_eq!(hero.health, config.hero_max_health);
             assert_eq!(hero.potion_count, config.hero_initial_potion_count);
 
             // verify the hero's tokens for weapon and armor were minted
             assert_eq!(hero, game.heroes.get(bob()).unwrap());
 
-            MOCK_EFINITY.with(|efinity| {
-                let efinity = efinity.borrow();
+            // assert weapon token is frozen
+            let weapon_token = game
+                .env()
+                .extension()
+                .token_of(collection_id, hero.weapon_id)
+                .unwrap();
+            assert!(weapon_token.is_frozen);
 
-                // assert weapon token is frozen
-                let weapon_token = efinity.token_of(collection_id, hero.weapon_id).unwrap();
-                assert!(weapon_token.is_frozen);
+            // assert bob has the weapon token
+            assert_eq!(
+                game.env()
+                    .extension()
+                    .balance_of(collection_id, hero.weapon_id, bob()),
+                1
+            );
 
-                // assert bob has the weapon token
-                assert_eq!(efinity.balance_of(collection_id, hero.weapon_id, bob()), 1);
-
-                // assert the weapon token attribute exists
-                assert!(efinity
-                    .attribute_of(collection_id, Some(hero.weapon_id), attribute_key())
-                    .is_some());
-            })
+            // assert the weapon token attribute exists
+            assert!(game
+                .env()
+                .extension()
+                .attribute_of(collection_id, Some(hero.weapon_id), attribute_key())
+                .is_some());
         }
 
         /// Test `mutate_config` function
@@ -854,7 +886,7 @@ mod game {
             assert_eq!(game.start_battle().unwrap_err(), Error::HeroNotFound);
 
             // create the hero and then start the battle
-            game.create_hero();
+            game.create_hero().unwrap();
             game.start_battle().unwrap();
             let hero = game.get_hero(alice()).unwrap();
             let enemy = hero.battle.unwrap().enemy;
@@ -876,7 +908,7 @@ mod game {
 
             // bob starts a battle
             test::set_caller::<EfinityEnvironment>(bob());
-            game.create_hero();
+            game.create_hero().unwrap();
             game.start_battle().unwrap();
 
             // ensure the enemy has no hat
@@ -897,7 +929,7 @@ mod game {
             };
             let attack_variance = config.attack_variance;
             let mut game = init_game(config);
-            game.create_hero();
+            game.create_hero().unwrap();
             game.start_battle().unwrap();
             let initial_enemy = game.get_hero(alice()).unwrap().battle.unwrap().enemy;
 
@@ -955,7 +987,7 @@ mod game {
             let caller = bob();
             test::set_caller::<EfinityEnvironment>(caller);
 
-            game.create_hero();
+            game.create_hero().unwrap();
             game.start_battle().unwrap();
 
             // set hero health to 1 less than max health
@@ -1003,7 +1035,7 @@ mod game {
                 enemy_wearing_hat_chance: 100,
                 ..Default::default()
             });
-            game.create_hero();
+            game.create_hero().unwrap();
             game.start_battle().unwrap();
 
             // set hero health to 1 and increase victory count
@@ -1047,39 +1079,40 @@ mod game {
         #[ink::test]
         fn test_equip() {
             let mut game = init_game(Default::default());
-            let hero = game.create_hero();
+            let hero = game.create_hero().unwrap();
             let initial_weapon_id = hero.weapon_id;
 
             // cannot set to token that does not exist
             assert_eq!(game.equip(10).unwrap_err(), Error::InvalidEquipment);
 
             // Mint a new token. It will still fail because there is no weapon attribute
-            let new_weapon_id = game.mint_nft(alice(), TokenType::Weapon, false);
+            let new_weapon_id = game.mint_nft(alice(), TokenType::Weapon, false).unwrap();
             assert_eq!(
                 game.equip(new_weapon_id).unwrap_err(),
                 Error::InvalidEquipment
             );
 
             // add equipment attribute and now it works
-            game.add_equipment_attribute(new_weapon_id, (1, 1).into());
+            game.add_equipment_attribute(new_weapon_id, (1, 1).into())
+                .unwrap();
             game.equip(new_weapon_id).unwrap();
 
             // make sure new weapon is frozen. Old one is not frozen.
-            MOCK_EFINITY.with(|efinity| {
-                let efinity = efinity.borrow();
-                assert!(
-                    !efinity
-                        .token_of(game.collection_id, initial_weapon_id)
-                        .unwrap()
-                        .is_frozen
-                );
-                assert!(
-                    efinity
-                        .token_of(game.collection_id, new_weapon_id)
-                        .unwrap()
-                        .is_frozen
-                );
-            });
+            assert!(
+                !game
+                    .env()
+                    .extension()
+                    .token_of(game.collection_id, initial_weapon_id)
+                    .unwrap()
+                    .is_frozen
+            );
+            assert!(
+                game.env()
+                    .extension()
+                    .token_of(game.collection_id, new_weapon_id)
+                    .unwrap()
+                    .is_frozen
+            );
 
             let hero = game.heroes.get(alice()).unwrap();
             assert_eq!(hero.weapon_id, new_weapon_id);
@@ -1089,10 +1122,10 @@ mod game {
         #[ink::test]
         fn test_unequip_hat() {
             let mut game = init_game(Default::default());
-            game.create_hero();
+            game.create_hero().unwrap();
 
             // equip a hat
-            let hat_id = game.mint_nft(alice(), TokenType::Hat, false);
+            let hat_id = game.mint_nft(alice(), TokenType::Hat, false).unwrap();
             game.equip(hat_id).unwrap();
 
             // hero should be wearing the hat
@@ -1107,15 +1140,14 @@ mod game {
             assert!(hero.hat_id.is_none());
 
             // make sure the hat is not frozen
-            MOCK_EFINITY.with(|efinity| {
-                assert!(
-                    !efinity
-                        .borrow()
-                        .token_of(game.collection_id, hat_id)
-                        .unwrap()
-                        .is_frozen
-                );
-            });
+            assert!(
+                !game
+                    .env()
+                    .extension()
+                    .token_of(game.collection_id, hat_id)
+                    .unwrap()
+                    .is_frozen
+            );
         }
 
         /// Test `rest` function
@@ -1131,7 +1163,7 @@ mod game {
             assert_eq!(game.rest(), Err(Error::HeroNotFound));
 
             // create hero with 1 health
-            let mut hero = game.create_hero();
+            let mut hero = game.create_hero().unwrap();
             hero.health = 1;
             game.heroes.insert(alice(), &hero);
 
@@ -1139,7 +1171,7 @@ mod game {
             assert_eq!(game.rest(), Err(Error::NotEnoughGold));
 
             // mint gold and then can rest
-            game.mint_gold(20);
+            game.mint_gold(20).unwrap();
             assert_eq!(game.get_gold_balance(alice()), 20);
             game.rest().unwrap();
             assert_eq!(game.get_gold_balance(alice()), 10);
@@ -1163,12 +1195,12 @@ mod game {
             assert_eq!(game.buy_potion(1), Err(Error::HeroNotFound));
 
             // cant buy if you don't have enough gold
-            game.create_hero();
-            game.mint_gold(15);
+            game.create_hero().unwrap();
+            game.mint_gold(15).unwrap();
             assert_eq!(game.buy_potion(2), Err(Error::NotEnoughGold));
 
             // mint gold and then buy the potion
-            game.mint_gold(5);
+            game.mint_gold(5).unwrap();
             assert_eq!(game.get_gold_balance(alice()), 20);
             game.buy_potion(2).unwrap();
             assert_eq!(game.get_gold_balance(alice()), 0);
@@ -1189,11 +1221,11 @@ mod game {
             assert_eq!(game.buy_weapon(), Err(Error::HeroNotFound));
 
             // cant buy if you don't have enough gold
-            game.create_hero();
+            game.create_hero().unwrap();
             assert_eq!(game.buy_weapon(), Err(Error::NotEnoughGold));
 
             // can now buy the weapon
-            game.mint_gold(10);
+            game.mint_gold(10).unwrap();
             let weapon_id = game.buy_weapon().unwrap();
             let metadata = game.get_metadata(weapon_id).unwrap().unwrap();
 

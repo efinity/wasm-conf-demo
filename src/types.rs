@@ -6,7 +6,10 @@ use scale_info::TypeInfo;
 /// Error types for the game
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+#[allow(clippy::enum_variant_names)]
 pub enum Error {
+    /// An error from Efinity
+    EfinityError(efinity_contracts::Error),
     /// The caller does not have permission for this operation
     NoPermission,
     /// The equipment being equipped is invalid
@@ -23,6 +26,12 @@ pub enum Error {
     HeroHasNoPotions,
     /// The provided account id does not have enough gold
     NotEnoughGold,
+}
+
+impl From<efinity_contracts::Error> for Error {
+    fn from(error: efinity_contracts::Error) -> Self {
+        Self::EfinityError(error)
+    }
 }
 
 /// Result type for the game
